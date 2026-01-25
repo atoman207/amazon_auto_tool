@@ -1,0 +1,112 @@
+================================================================
+    AMAZON AUTOMATION TOOL - HOW TO USE
+================================================================
+
+📦 FIRST TIME SETUP
+================================================================
+
+1. Run setup.bat
+   - Double-click setup.bat
+   - This will:
+     ✓ Create virtual environment
+     ✓ Install all dependencies
+     ✓ Install Playwright browser
+     ✓ Create .env file
+
+2. Configure .env file
+   - Open .env file in notepad
+   - Add your Amazon password:
+     AMAZON_PASSWORD=your_actual_password
+   - Save and close
+
+3. Add Gmail API credentials
+   - Place your client_secret_*.json file in the data\ folder
+   - Get credentials from: https://console.cloud.google.com/
+
+
+🚀 RUNNING THE AUTOMATION
+================================================================
+
+1. Double-click run.bat
+   - The automation will start automatically
+   - A Chrome browser will open
+   - Follow the on-screen instructions
+
+2. Manual Steps Required:
+   - When the "Passkey modal" appears, close it manually
+   - The script will wait for you
+   - After closing the modal, the script continues automatically
+
+
+📋 WHAT THE AUTOMATION DOES
+================================================================
+
+✓ Opens Amazon Japan login page
+✓ Enters your email address
+✓ Clicks "Continue" button
+✓ Waits for you to close the Passkey modal
+✓ Enters your password
+✓ Clicks "Sign In" button
+✓ Retrieves OTP from Gmail automatically
+✓ Enters OTP and completes login
+✓ Navigates to Business Discount page
+✓ Selects 3 categories:
+  - IT関連機器 (IT-related equipment)
+  - 医療用品・消耗品 (Medical supplies)
+  - 日用品・食品・飲料 (Daily necessities, food, beverages)
+✓ Filters products with 30%+ discount
+✓ Sorts by Business Discount (Descending)
+✓ Scrolls through products to display all items
+✓ Keeps browser open for 30 seconds
+✓ Closes automatically
+
+
+🔧 TROUBLESHOOTING
+================================================================
+
+Problem: "Python is not installed"
+Solution: Install Python from https://www.python.org/
+          Make sure to check "Add Python to PATH" during installation
+
+Problem: "Dependencies not installed"
+Solution: Run setup.bat again
+
+Problem: Login fails
+Solution: Check your .env file has correct password
+          Make sure Gmail API credentials are in data\ folder
+
+Problem: Browser doesn't open
+Solution: Run setup.bat to install Playwright browsers
+
+Problem: Session expires
+Solution: Just run run.bat again - it will re-login automatically
+
+
+📁 FILE STRUCTURE
+================================================================
+
+amazon_auto.py          - Main automation script
+run.bat                 - Quick run script
+setup.bat              - Initial setup script
+requirements.txt       - Python dependencies
+.env                   - Your Amazon password (keep secret!)
+.env.example          - Example .env file
+amazon_session.json   - Saved login session (auto-generated)
+data\                 - Gmail API credentials folder
+  └─ client_secret_*.json
+
+
+💡 TIPS
+================================================================
+
+• Run setup.bat only once (first time)
+• Use run.bat every time you want to run the automation
+• The script saves your session, so you may not need to login every time
+• Keep the .env file secure - it contains your password
+• The automation is optimized for speed
+• Browser stays open for 30 seconds at the end so you can review results
+
+
+================================================================
+For issues or questions, check the console output for detailed logs
+================================================================
