@@ -58,6 +58,19 @@ except ImportError as e:
     print("="*70 + "\n")
     sys.exit(1)
 
+try:
+    import gspread
+except ImportError as e:
+    print("\n" + "="*70)
+    print("[ERROR] gspread is not installed!")
+    print("="*70)
+    print("Please install it by running:")
+    print("  pip install gspread")
+    print("="*70)
+    print(f"Detailed error: {e}")
+    print("="*70 + "\n")
+    sys.exit(1)
+
 # ============================================================================
 # CONFIGURATION
 # ============================================================================
@@ -83,6 +96,16 @@ if not AMAZON_PASSWORD:
 GMAIL_SCOPES = ['https://www.googleapis.com/auth/gmail.readonly']
 GMAIL_CREDENTIALS_FILE = Path('data/client_secret_446842116198-amdijg8d7tb7rff25o4514r19pp1d8o9.apps.googleusercontent.com.json')
 GMAIL_TOKEN_FILE = Path('token.json')
+
+# Google Sheets API settings
+SHEETS_SCOPES = [
+    'https://www.googleapis.com/auth/gmail.readonly',
+    'https://www.googleapis.com/auth/spreadsheets'
+]
+SHEETS_CREDENTIALS_FILE = GMAIL_CREDENTIALS_FILE  # Use same OAuth credentials
+SHEETS_TOKEN_FILE = Path('sheets_token.json')
+SPREADSHEET_URL = "https://docs.google.com/spreadsheets/d/1t_HjbOjlcgwZACo2glY8w-OfUVAGa3TEcX2h5wIwejk/edit?hl=ja&gid=0#gid=0"
+SPREADSHEET_ID = "1t_HjbOjlcgwZACo2glY8w-OfUVAGa3TEcX2h5wIwejk"  # Extracted from URL
 
 # Session file
 SESSION_FILE = "amazon_session.json"
@@ -488,6 +511,133 @@ def get_amazon_otp_from_gmail(max_age_minutes=5, max_retries=12, retry_delay=5):
 
 
 # ============================================================================
+# GOOGLE SHEETS API FUNCTIONS
+# ============================================================================
+
+def get_sheets_service():
+    """
+    Authenticate and return Google Sheets API service using gspread
+    
+    Returns:
+        gspread client object
+    """
+    creds = None
+    
+    # Load existing token if available
+    if SHEETS_TOKEN_FILE.exists():
+        try:
+            creds = Credentials.from_authorized_user_file(str(SHEETS_TOKEN_FILE), SHEETS_SCOPES)
+        except Exception as e:
+            print(f"[WARNING] Could not load Sheets token: {e}")
+            creds = None
+    
+    # If no valid credentials, do OAuth flow
+    if not creds or not creds.valid:
+        if creds and creds.expired and creds.refresh_token:
+            print("[INFO] Refreshing expired Sheets token...")
+            try:
+                creds.refresh(Request())
+            except Exception as e:
+                print(f"[WARNING] Token refresh failed: {e}")
+                creds = None
+        
+        if not creds:
+            if not SHEETS_CREDENTIALS_FILE.exists():
+                raise FileNotFoundError(
+                    f"\n[ERROR] Google credentials file not found: {SHEETS_CREDENTIALS_FILE}\n"
+                    "Please download OAuth credentials from Google Cloud Console."
+                )
+            
+            print("\n" + "="*60)
+            print("GOOGLE SHEETS API AUTHORIZATION REQUIRED")
+            print("="*60)
+            print("A browser window will open for Google authorization.")
+            print("="*60 + "\n")
+            
+            flow = InstalledAppFlow.from_client_secrets_file(
+                str(SHEETS_CREDENTIALS_FILE), SHEETS_SCOPES
+            )
+            creds = flow.run_local_server(port=0)
+            
+            # Save credentials for future use
+            SHEETS_TOKEN_FILE.write_text(creds.to_json())
+            print(f"[SUCCESS] Sheets token saved to {SHEETS_TOKEN_FILE}")
+    
+    # Return gspread client
+    return gspread.authorize(creds)
+
+
+def send_to_google_sheets(products_data):
+    """
+    Send scraped product data to Google Sheets
+    
+    Args:
+        products_data: List of dictionaries containing product information
+        
+    Returns:
+        True if successful, False otherwise
+    """
+    try:
+        print("\n" + "="*60)
+        print("SENDING DATA TO GOOGLE SHEETS")
+        print("="*60)
+        
+        # Authenticate with Google Sheets
+        print("[INFO] Authenticating with Google Sheets...")
+        gc = get_sheets_service()
+        
+        # Open the spreadsheet
+        print(f"[INFO] Opening spreadsheet: {SPREADSHEET_ID}")
+        spreadsheet = gc.open_by_key(SPREADSHEET_ID)
+        worksheet = spreadsheet.sheet1  # Use first sheet
+        
+        # Clear existing data (keep header if exists)
+        print("[INFO] Clearing existing data...")
+        worksheet.clear()
+        
+        # Prepare header row
+        headers = [
+            "ASIN",
+            "Product Name",
+            "Number of Products",
+            "Reference Price (JPY)",
+            "Price per Unit (JPY)",
+            "Discount Rate (%)",
+            "Discount Amount (JPY)"
+        ]
+        
+        # Prepare data rows
+        rows = [headers]
+        for product in products_data:
+            row = [
+                product.get('asin', ''),
+                product.get('name', ''),
+                product.get('quantity', ''),
+                product.get('reference_price', ''),
+                product.get('unit_price', ''),
+                product.get('discount_rate', ''),
+                product.get('discount_amount', '')
+            ]
+            rows.append(row)
+        
+        # Write all data at once
+        print(f"[INFO] Writing {len(products_data)} products to spreadsheet...")
+        worksheet.update('A1', rows)
+        
+        print(f"[SUCCESS] Successfully wrote {len(products_data)} products to Google Sheets!")
+        print(f"[INFO] View at: {SPREADSHEET_URL}")
+        print("="*60)
+        
+        return True
+        
+    except Exception as e:
+        print(f"\n[ERROR] Failed to send data to Google Sheets: {e}")
+        import traceback
+        traceback.print_exc()
+        return False
+
+
+# ============================================================================
 # BROWSER AUTOMATION FUNCTIONS
 # ============================================================================
 
@@ -554,6 +704,255 @@ def scroll_products_page(page, scroll_times=10, scroll_delay=1.0):
         print("[SUCCESS] Finished scrolling through products")
     except Exception as e:
         print(f"[WARNING] Error during scrolling: {e}")
+
+
+def extract_number(text):
+    """Extract numeric value from text (handles Japanese currency format)"""
+    if not text:
+        return None
+    # Remove currency symbols, commas, and extract number
+    cleaned = re.sub(r'[¥,円JPY\s]', '', text)
+    match = re.search(r'\d+(?:\.\d+)?', cleaned)
+    return match.group(0) if match else None
+
+
+def scrape_product_details(page, product_url):
+    """
+    Scrape product details from a product detail page
+    
+    Args:
+        page: Playwright page object
+        product_url: URL of the product detail page
+        
+    Returns:
+        Dictionary containing product information, or None if failed
+    """
+    try:
+        print(f"  [INFO] Opening product page...")
+        page.goto(product_url, wait_until="domcontentloaded", timeout=30000)
+        time.sleep(2)  # Wait for dynamic content to load
+        
+        product_data = {}
+        
+        # Extract ASIN from URL (format: /dp/ASIN/ or /gp/product/ASIN)
+        asin_match = re.search(r'/(?:dp|gp/product)/([A-Z0-9]{10})', product_url)
+        product_data['asin'] = asin_match.group(1) if asin_match else ''
+        
+        # Extract Product Name
+        try:
+            name_elem = page.locator("#productTitle, .a-truncate-cut").first
+            if name_elem.count() > 0:
+                product_data['name'] = name_elem.inner_text().strip()
+            else:
+                product_data['name'] = ''
+        except Exception as e:
+            print(f"    [WARNING] Could not extract product name: {e}")
+            product_data['name'] = ''
+        
+        # Extract Number of Products (quantity)
+        try:
+            # Look for quantity selector or package information
+            quantity_elem = page.locator("#quantity, [name='quantity'], .a-dropdown-prompt").first
+            if quantity_elem.count() > 0:
+                product_data['quantity'] = quantity_elem.inner_text().strip()
+            else:
+                product_data['quantity'] = '1'  # Default to 1
+        except Exception:
+            product_data['quantity'] = '1'
+        
+        # Extract Reference Price (original price before discount)
+        try:
+            # Multiple selectors for reference price
+            ref_price_selectors = [
+                ".a-price.a-text-price",
+                ".basisPrice .a-price .a-offscreen",
+                "[data-a-strike='true'] .a-offscreen",
+                ".a-text-strike .a-offscreen"
+            ]
+            ref_price = None
+            for selector in ref_price_selectors:
+                elem = page.locator(selector).first
+                if elem.count() > 0:
+                    ref_price = elem.inner_text().strip()
+                    break
+            product_data['reference_price'] = extract_number(ref_price) if ref_price else ''
+        except Exception as e:
+            print(f"    [WARNING] Could not extract reference price: {e}")
+            product_data['reference_price'] = ''
+        
+        # Extract Current Price (Price per Unit)
+        try:
+            # Multiple selectors for current price
+            price_selectors = [
+                ".a-price.priceToPay .a-offscreen",
+                ".a-price .a-offscreen",
+                "#priceblock_ourprice",
+                "#priceblock_dealprice",
+                ".a-color-price"
+            ]
+            current_price = None
+            for selector in price_selectors:
+                elem = page.locator(selector).first
+                if elem.count() > 0:
+                    current_price = elem.inner_text().strip()
+                    # Skip if this is the reference price
+                    if current_price and "a-text-price" not in selector:
+                        break
+            product_data['unit_price'] = extract_number(current_price) if current_price else ''
+        except Exception as e:
+            print(f"    [WARNING] Could not extract unit price: {e}")
+            product_data['unit_price'] = ''
+        
+        # Calculate Discount Rate and Amount
+        try:
+            if product_data['reference_price'] and product_data['unit_price']:
+                ref = float(product_data['reference_price'])
+                curr = float(product_data['unit_price'])
+                discount_amount = ref - curr
+                discount_rate = (discount_amount / ref) * 100 if ref > 0 else 0
+                product_data['discount_rate'] = f"{discount_rate:.1f}"
+                product_data['discount_amount'] = f"{discount_amount:.0f}"
+            else:
+                # Try to extract discount percentage directly from page
+                discount_elem = page.locator(".savingsPercentage, .percent-off").first
+                if discount_elem.count() > 0:
+                    discount_text = discount_elem.inner_text().strip()
+                    discount_num = extract_number(discount_text)
+                    product_data['discount_rate'] = discount_num if discount_num else ''
+                else:
+                    product_data['discount_rate'] = ''
+                product_data['discount_amount'] = ''
+        except Exception as e:
+            print(f"    [WARNING] Could not calculate discount: {e}")
+            product_data['discount_rate'] = ''
+            product_data['discount_amount'] = ''
+        
+        print(f"    [SUCCESS] Scraped: {product_data['name'][:50]}...")
+        return product_data
+        
+    except Exception as e:
+        print(f"    [ERROR] Failed to scrape product: {e}")
+        return None
+
+
+def scrape_all_products(page, context):
+    """
+    Scrape all products from the filtered results page
+    Scrolls gradually and scrapes products as they appear
+    Opens each product in a new tab, scrapes data, and closes tab
+    
+    Args:
+        page: Playwright page object
+        context: Playwright browser context
+        
+    Returns:
+        List of product data dictionaries
+    """
+    print("\n" + "="*60)
+    print("STEP 4: SCRAPING PRODUCT DATA (SCROLL & SCRAPE)")
+    print("="*60)
+    
+    try:
+        products_data = []
+        scraped_urls = set()  # Track already scraped products
+        scroll_count = 0
+        max_scrolls = 20  # Maximum number of scrolls
+        no_new_products_count = 0  # Counter for consecutive scrolls with no new products
+        
+        print("\n[INFO] Starting scroll-and-scrape process...")
+        print("[INFO] Products will be scraped as they appear during scrolling")
+        print("="*60)
+        
+        while scroll_count < max_scrolls:
+            # Find currently visible product containers
+            product_containers = page.locator(".sg-product-gallery-item, [data-component-type='s-search-result']").all()
+            
+            if len(product_containers) == 0:
+                print(f"\n[Scroll {scroll_count + 1}] No products found yet, scrolling...")
+                page.mouse.wheel(0, 500)
+                time.sleep(1.5)
+                scroll_count += 1
+                continue
+            
+            # Extract URLs from visible containers
+            new_urls = []
+            for container in product_containers:
+                try:
+                    # Find product link
+                    link = container.locator("h2 a, .a-link-normal[href*='/dp/'], .a-link-normal[href*='/gp/product/']").first
+                    if link.count() > 0:
+                        url = link.get_attribute("href")
+                        if url:
+                            # Convert relative URL to absolute
+                            if url.startswith('/'):
+                                url = f"https://www.amazon.co.jp{url}"
+                            
+                            # Only add if not already scraped
+                            if url not in scraped_urls:
+                                new_urls.append(url)
+                                scraped_urls.add(url)
+                except Exception:
+                    continue
+            
+            # Scrape new products found in this batch
+            if new_urls:
+                no_new_products_count = 0  # Reset counter
+                print(f"\n[Scroll {scroll_count + 1}] Found {len(new_urls)} new products to scrape")
+                print(f"[INFO] Total products discovered so far: {len(scraped_urls)}")
+                
+                for i, url in enumerate(new_urls):
+                    print(f"\n  [{len(products_data) + 1}] Scraping product...")
+                    
+                    # Open product in new tab
+                    new_page = context.new_page()
+                    
+                    try:
+                        # Scrape product details
+                        product_data = scrape_product_details(new_page, url)
+                        
+                        if product_data:
+                            products_data.append(product_data)
+                            print(f"    [SUCCESS] Scraped: {product_data.get('name', 'Unknown')[:60]}...")
+                        else:
+                            print(f"    [WARNING] Failed to scrape product")
+                        
+                    except Exception as e:
+                        print(f"    [ERROR] Error: {e}")
+                    
+                    finally:
+                        # Close the product tab
+                        new_page.close()
+                        time.sleep(0.8)  # Polite delay between requests
+            else:
+                no_new_products_count += 1
+                print(f"\n[Scroll {scroll_count + 1}] No new products found")
+                
+                # If no new products found in 3 consecutive scrolls, we've reached the end
+                if no_new_products_count >= 3:
+                    print("\n[INFO] No new products found after 3 scrolls - reached end of results")
+                    break
+            
+            # Scroll down to load more products
+            print(f"[INFO] Scrolling down to load more products...")
+            page.mouse.wheel(0, 500)
+            time.sleep(1.5)  # Wait for lazy loading
+            scroll_count += 1
+        
+        if scroll_count >= max_scrolls:
+            print(f"\n[INFO] Reached maximum scroll limit ({max_scrolls} scrolls)")
+        
+        print("\n" + "="*60)
+        print(f"[SUCCESS] Scraped {len(products_data)} products successfully")
+        print(f"[INFO] Total scrolls: {scroll_count}")
+        print("="*60)
+        
+        return products_data
+        
+    except Exception as e:
+        print(f"\n[ERROR] Failed to scrape products: {e}")
+        import traceback
+        traceback.print_exc()
+        return products_data  # Return whatever we've scraped so far
 
 
 def login_to_amazon(page, context):
@@ -1085,9 +1484,7 @@ def apply_filters_and_sort(page):
         print(f"  ✓ Discount: {MIN_DISCOUNT_PERCENT}%+")
         print(f"  ✓ Sort: Business Discount (Descending)")
         print("="*60)
-        
-        # Scroll through the filtered products page
-        scroll_products_page(page, scroll_times=10, scroll_delay=1.0)
+        print("\n[INFO] Products will be scraped while scrolling (no pre-scroll)")
         
         return True
         
@@ -1136,11 +1533,15 @@ def check_session_valid(page):
 def run_automation():
     """
     Main automation workflow (single visible browser):
-    1. Open Amazon (Japanese locale) using saved session if available
-    2. If session invalid: enter email/password and trigger OTP
-    3. Fetch OTP from Gmail API and enter automatically
-    4. Save session
-    5. Navigate to Business Discounts and apply clicks/filters
+    Milestone 1:
+        1. Open Amazon (Japanese locale) using saved session if available
+        2. If session invalid: enter email/password and trigger OTP
+        3. Fetch OTP from Gmail API and enter automatically
+        4. Save session
+        5. Navigate to Business Discounts and apply clicks/filters
+    Milestone 2:
+        6. Scrape all product data (ASIN, name, prices, discount, etc.)
+        7. Send scraped data to Google Sheets
     """
     print("\n" + "="*70)
     print(" "*10 + "AMAZON BUSINESS DISCOUNT AUTOMATION")
@@ -1215,14 +1616,42 @@ def run_automation():
 
             apply_filters_and_sort(page)
 
-            print("\n" + "="*70)
-            print(" "*20 + "DONE")
-            print("="*70)
-            print("[INFO] Product list should be displayed now.")
-            print("[INFO] Keeping browser open for 30 seconds, then closing automatically.")
-            time.sleep(30)
+            # MILESTONE 2: Scrape product data (scroll and scrape simultaneously)
+            print("\n" + "="*60)
+            print("STEP: SCRAPING PRODUCTS (MILESTONE 2)")
+            print("="*60)
+            products_data = scrape_all_products(page, context)
+            
+            if len(products_data) == 0:
+                print("\n[WARNING] No products were scraped. Skipping Google Sheets export.")
+                print("[INFO] Closing browser...")
+                browser.close()
+                return False
+            
+            # Send data to Google Sheets
+            print("\n" + "="*60)
+            print("STEP: EXPORTING TO GOOGLE SHEETS")
+            print("="*60)
+            sheets_success = send_to_google_sheets(products_data)
+            
+            if sheets_success:
+                print("\n" + "="*70)
+                print(" "*15 + "✓ ALL MILESTONES COMPLETED ✓")
+                print("="*70)
+                print(f"[SUCCESS] Scraped {len(products_data)} products")
+                print(f"[SUCCESS] Data exported to Google Sheets")
+                print(f"[INFO] View at: {SPREADSHEET_URL}")
+                print("="*70)
+            else:
+                print("\n[WARNING] Failed to export data to Google Sheets")
+                print(f"[INFO] However, {len(products_data)} products were successfully scraped")
+
+            # Close browser immediately after completion
+            print("\n[INFO] Closing browser...")
             browser.close()
-            return True
+            print("[SUCCESS] Browser closed")
+            
+            return sheets_success
 
         except Exception as e:
             print(f"\n[ERROR] Automation failed: {e}")
@@ -1248,12 +1677,16 @@ def main():
     print(f"  - Session File: {SESSION_FILE}")
     print("="*70)
     print("\nExecution Flow:")
-    print("  1. Gmail authorization (browser opens, then closes)")
-    print("  2. Amazon login (browser reopens)")
-    print("  3. Enter email and password")
-    print("  4. Enter verification code from email")
-    print("  5. Select product categories")
-    print("  6. Display product list")
+    print("  Milestone 1:")
+    print("    1. Gmail authorization (browser opens, then closes)")
+    print("    2. Amazon login (browser reopens)")
+    print("    3. Enter email and password")
+    print("    4. Enter verification code from email")
+    print("    5. Select product categories")
+    print("    6. Display product list")
+    print("  Milestone 2:")
+    print("    7. Scrape product data (ASIN, name, price, discount, etc.)")
+    print("    8. Send data to Google Sheets")
     print("="*70 + "\n")
     
     # Check if Gmail credentials exist

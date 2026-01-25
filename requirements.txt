@@ -1,10 +1,14 @@
+# Browser automation
 playwright==1.48.0
+
+# Environment variables
 python-dotenv==1.0.1
-pandas==2.2.0
-openpyxl==3.1.2
 
 # Gmail API for automatic OTP retrieval
 google-auth==2.27.0
 google-auth-oauthlib==1.2.0
 google-auth-httplib2==0.2.0
 google-api-python-client==2.116.0
+
+# Google Sheets API for data export
+gspread==6.0.0

@@ -16,8 +16,10 @@ ENV/
 # Session files
 amazon_session.json
 
-# Google API credentials
+# Google API credentials and tokens
 data/client_secret_*.json
+token.json
+sheets_token.json
 
 # IDE
 .vscode/

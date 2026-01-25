@@ -22,6 +22,12 @@
 3. Add Gmail API credentials
    - Place your client_secret_*.json file in the data\ folder
    - Get credentials from: https://console.cloud.google.com/
+   - Enable both Gmail API and Google Sheets API
+
+4. First run authorization
+   - First time running, Google will ask for permissions
+   - Grant access to Gmail (for OTP) and Google Sheets (for data export)
+   - This authorization is saved for future runs
 
 
 🚀 RUNNING THE AUTOMATION
@@ -41,6 +47,7 @@
 📋 WHAT THE AUTOMATION DOES
 ================================================================
 
+MILESTONE 1: Login & Filter Products
 ✓ Opens Amazon Japan login page
 ✓ Enters your email address
 ✓ Clicks "Continue" button
@@ -57,8 +64,24 @@
 ✓ Filters products with 30%+ discount
 ✓ Sorts by Business Discount (Descending)
 ✓ Scrolls through products to display all items
-✓ Keeps browser open for 30 seconds
-✓ Closes automatically
+
+MILESTONE 2: Scrape & Export Data
+✓ Scrolls down gradually through product results
+✓ Scrapes products as they appear during scrolling
+✓ Opens each product in a new tab
+✓ Scrapes product information:
+  - ASIN (Amazon product ID)
+  - Product Name
+  - Number of Products
+  - Reference Price (original price)
+  - Price per Unit (current price)
+  - Discount Rate (%)
+  - Discount Amount (JPY)
+✓ Closes each product tab after scraping
+✓ Continues until all products are scraped
+✓ Exports all data to Google Sheets automatically
+✓ Displays results in your spreadsheet
+✓ Closes browser immediately after completion
 
 
 🔧 TROUBLESHOOTING
@@ -92,8 +115,14 @@ requirements.txt       - Python dependencies
 .env                   - Your Amazon password (keep secret!)
 .env.example          - Example .env file
 amazon_session.json   - Saved login session (auto-generated)
+sheets_token.json     - Google Sheets auth token (auto-generated)
+token.json            - Gmail auth token (auto-generated)
 data\                 - Gmail API credentials folder
   └─ client_secret_*.json
+doc\                  - Documentation folder
+  ├─ milestone.md     - Overview of all milestones
+  ├─ milestone1.md    - Milestone 1 documentation
+  └─ milestone2.md    - Milestone 2 documentation
 
 
 💡 TIPS
@@ -105,6 +134,9 @@ data\                 - Gmail API credentials folder
 • Keep the .env file secure - it contains your password
 • The automation is optimized for speed
 • Browser stays open for 30 seconds at the end so you can review results
+• Scraped data is automatically exported to Google Sheets
+• View your data at: https://docs.google.com/spreadsheets/d/1t_HjbOjlcgwZACo2glY8w-OfUVAGa3TEcX2h5wIwejk/
+• Google authorization is required only once (tokens are saved)
 
 
 ================================================================

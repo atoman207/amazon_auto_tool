@@ -41,14 +41,18 @@ echo [INFO] Activating virtual environment...
 call venv\Scripts\activate.bat
 echo.
 
-REM Upgrade pip
-echo [INFO] Upgrading pip...
-python -m pip install --upgrade pip
+REM Upgrade pip, setuptools, and wheel
+echo [INFO] Upgrading pip, setuptools, and wheel...
+python -m pip install --upgrade pip setuptools wheel
 echo.
 
 REM Install requirements
 echo [INFO] Installing Python dependencies...
-pip install -r requirements.txt
+echo [INFO] This may take a few minutes...
+pip install playwright python-dotenv
+pip install google-auth google-auth-oauthlib google-auth-httplib2 google-api-python-client
+pip install gspread --prefer-binary
+echo [SUCCESS] Dependencies installed
 echo.
 
 REM Install Playwright browsers
