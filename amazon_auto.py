@@ -120,7 +120,7 @@ SELECTED_CATEGORIES = [
     "医療用品・消耗品",     # Medical Supplies
     "日用品・食品・飲料"    # Daily Necessities
 ]
-MIN_DISCOUNT_PERCENT = 30
+MIN_DISCOUNT_PERCENT = 5
 
 # Timeouts and delays
 TIMEOUT_MS = 30000
@@ -186,8 +186,8 @@ CATEGORY_SHOW_RESULTS_BUTTON = "xpath=/html/body/div[1]/div[1]/div/div/div[3]/se
 
 # Discount dropdown and filter
 DISCOUNT_DROPDOWN_BUTTON = "xpath=/html/body/div[1]/div[1]/div/div/div[3]/section/div/div/div/div/div[1]/div[2]/div[2]/div[1]/span/span/input"
-# Clicking the div container for 30% discount
-DISCOUNT_30_PERCENT_RADIO = "xpath=/html/body/div[1]/div[1]/div/div/div[3]/section/div/div/div/div/div[1]/div[2]/div[2]/div[2]/div[2]/fieldset/div[6]"
+# Clicking the div container for 5% discount
+DISCOUNT_5_PERCENT_RADIO = "xpath=/html/body/div[1]/div[1]/div/div/div[3]/section/div/div/div/div/div[1]/div[2]/div[2]/div[2]/div[2]/fieldset/div[1]"
 DISCOUNT_SHOW_RESULTS_BUTTON = "xpath=/html/body/div[1]/div[1]/div/div/div[3]/section/div/div/div/div/div[1]/div[2]/div[2]/div[2]/div[4]/div[2]/span/span/input"
 
 # Sort dropdown and option (ビジネス割引: 降順 = Business Discount: Descending)
@@ -1407,39 +1407,32 @@ def apply_filters_and_sort(page):
             print("[ERROR] Discount dropdown not found")
             return False
         
-        # Scroll down in the discount modal to view all options
-        print("\n[INFO] Scrolling within discount modal to view all options...")
+        # No need to scroll for 5% option as it's at the top
+        print("\n[INFO] Discount modal opened, 5% option should be visible...")
         try:
             # Wait a moment for modal to fully render
             time.sleep(1)
-            
-            # Scroll down within the modal to see 30% option
-            for i in range(4):
-                page.mouse.wheel(0, 150)  # Scroll down 150 pixels
-                time.sleep(0.3)
-            
-            print("[SUCCESS] Scrolled through discount modal")
-            time.sleep(0.5)
+            print("[SUCCESS] Discount modal ready")
             
         except Exception as e:
-            print(f"[WARNING] Could not scroll discount modal: {e}")
+            print(f"[WARNING] Could not prepare discount modal: {e}")
         
-        # Select 30% discount radio button
-        print("\n[4/5] Selecting 30% discount filter...")
-        discount_30_radio = page.locator(DISCOUNT_30_PERCENT_RADIO)
-        if discount_30_radio.count() > 0:
+        # Select 5% discount radio button
+        print("\n[4/5] Selecting 5% discount filter...")
+        discount_5_radio = page.locator(DISCOUNT_5_PERCENT_RADIO)
+        if discount_5_radio.count() > 0:
             try:
                 # Scroll element into view before clicking
-                discount_30_radio.scroll_into_view_if_needed(timeout=3000)
+                discount_5_radio.scroll_into_view_if_needed(timeout=3000)
                 time.sleep(0.3)
-                # Click the div container for 30% discount
-                discount_30_radio.click(force=True, timeout=3000)
+                # Click the div container for 5% discount
+                discount_5_radio.click(force=True, timeout=3000)
                 time.sleep(0.5)
-                print("[SUCCESS] 30% discount filter selected")
+                print("[SUCCESS] 5% discount filter selected")
             except Exception as e:
-                print(f"[ERROR] Failed to select 30% discount: {e}")
+                print(f"[ERROR] Failed to select 5% discount: {e}")
         else:
-            print("[WARNING] 30% discount radio button not found")
+            print("[WARNING] 5% discount radio button not found")
         
         # Click "Show Results" button for discount
         print("\n[INFO] Clicking 'Show Results' button for discount...")
