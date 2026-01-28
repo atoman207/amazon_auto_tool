@@ -94,7 +94,7 @@ if not AMAZON_PASSWORD:
 
 # Gmail API settings
 GMAIL_SCOPES = ['https://www.googleapis.com/auth/gmail.readonly']
-GMAIL_CREDENTIALS_FILE = Path('data/client_secret_446842116198-amdijg8d7tb7rff25o4514r19pp1d8o9.apps.googleusercontent.com.json')
+GMAIL_CREDENTIALS_FILE = Path('data/client_secret_446842116198-nke8rjis6iaeuagepsp9p5gvbsu2cte4.apps.googleusercontent.com.json')
 GMAIL_TOKEN_FILE = Path('token.json')
 
 # Google Sheets API settings
@@ -186,6 +186,7 @@ CATEGORY_SHOW_RESULTS_BUTTON = "xpath=/html/body/div[1]/div[1]/div/div/div[3]/se
 
 # Discount dropdown and filter
 DISCOUNT_DROPDOWN_BUTTON = "xpath=/html/body/div[1]/div[1]/div/div/div[3]/section/div/div/div/div/div[1]/div[2]/div[2]/div[1]/span/span/input"
+
 # Clicking the div container for 5% discount
 DISCOUNT_5_PERCENT_RADIO = "xpath=/html/body/div[1]/div[1]/div/div/div[3]/section/div/div/div/div/div[1]/div[2]/div[2]/div[2]/div[2]/fieldset/div[1]"
 DISCOUNT_SHOW_RESULTS_BUTTON = "xpath=/html/body/div[1]/div[1]/div/div/div[3]/section/div/div/div/div/div[1]/div[2]/div[2]/div[2]/div[4]/div[2]/span/span/input"
@@ -567,51 +568,98 @@ def get_sheets_service():
     return gspread.authorize(creds)
 
 
-def send_to_google_sheets(products_data):
+def initialize_google_sheets():
     """
-    Send scraped product data to Google Sheets
+    Initialize Google Sheets connection and ensure headers are present
     
-    Args:
-        products_data: List of dictionaries containing product information
-        
     Returns:
-        True if successful, False otherwise
+        Tuple of (gspread_client, worksheet, current_row_number) or (None, None, None) if failed
     """
     try:
-        print("\n" + "="*60)
-        print("SENDING DATA TO GOOGLE SHEETS")
-        print("="*60)
-        
         # Authenticate with Google Sheets
-        print("[INFO] Authenticating with Google Sheets...")
         gc = get_sheets_service()
         
         # Open the spreadsheet
-        print(f"[INFO] Opening spreadsheet: {SPREADSHEET_ID}")
         spreadsheet = gc.open_by_key(SPREADSHEET_ID)
         worksheet = spreadsheet.sheet1  # Use first sheet
         
-        # Clear existing data (keep header if exists)
-        print("[INFO] Clearing existing data...")
-        worksheet.clear()
+        # Read existing data to find the last row number
+        existing_data = worksheet.get_all_values()
         
-        # Prepare header row
+        # Prepare header row (Japanese to match existing spreadsheet)
         headers = [
+            "No",
+            "created_time",
             "ASIN",
-            "Product Name",
-            "Number of Products",
-            "Reference Price (JPY)",
-            "Price per Unit (JPY)",
-            "Discount Rate (%)",
-            "Discount Amount (JPY)"
+            "商品名",
+            "商品数",
+            "参考価格",
+            "数量別価格 （円）",
+            "割引率（％）",
+            "割引額（円）"
         ]
         
-        # Prepare data rows
-        rows = [headers]
-        for product in products_data:
+        # Determine starting row number
+        if len(existing_data) == 0:
+            # No data at all - write headers and start from 1
+            worksheet.update('A1', [headers])
+            current_number = 1
+        elif len(existing_data) == 1:
+            # Only headers exist - start from 1
+            # Update headers if they don't match
+            if existing_data[0] != headers:
+                worksheet.update('A1', [headers])
+            current_number = 1
+        else:
+            # Data exists - find the last number and continue from there
+            # Update headers if they don't match
+            if existing_data[0] != headers:
+                worksheet.update('A1', [headers])
+            
+            # Find the last row number
+            last_row_data = existing_data[-1]
+            try:
+                # Try to get the number from the first column
+                last_number = int(last_row_data[0]) if last_row_data[0] else 0
+            except (ValueError, IndexError):
+                # If we can't parse it, count the rows
+                last_number = len(existing_data) - 1
+            
+            current_number = last_number + 1
+        
+        return gc, worksheet, current_number
+        
+    except Exception as e:
+        print(f"\n[ERROR] Failed to initialize Google Sheets: {e}")
+        import traceback
+        traceback.print_exc()
+        return None, None, None
+
+
+def append_product_to_sheets(worksheet, product_rows, current_number):
+    """
+    Append a single product (with all its quantity tiers) to Google Sheets immediately
+    
+    Args:
+        worksheet: gspread worksheet object
+        product_rows: List of dictionaries for this product (one per quantity tier)
+        current_number: Current sequential product number
+        
+    Returns:
+        Next product number to use, or None if failed
+    """
+    try:
+        rows = []
+        
+        for idx, product in enumerate(product_rows):
+            # Check if this is the first tier of the product
+            is_first_tier = product.get('is_first_tier', idx == 0)
+            
             row = [
-                product.get('asin', ''),
-                product.get('name', ''),
+                current_number if is_first_tier else '',  # Sequential number (only for first tier)
+                product.get('created_time', ''),  # Timestamp (already blank for non-first tiers)
+                product.get('asin', ''),  # ASIN (already blank for non-first tiers)
+                product.get('name', ''),  # Name (already blank for non-first tiers)
                 product.get('quantity', ''),
                 product.get('reference_price', ''),
                 product.get('unit_price', ''),
@@ -620,21 +668,15 @@ def send_to_google_sheets(products_data):
             ]
             rows.append(row)
         
-        # Write all data at once
-        print(f"[INFO] Writing {len(products_data)} products to spreadsheet...")
-        worksheet.update('A1', rows)
+        # Append rows for this product
+        worksheet.append_rows(rows)
         
-        print(f"[SUCCESS] Successfully wrote {len(products_data)} products to Google Sheets!")
-        print(f"[INFO] View at: {SPREADSHEET_URL}")
-        print("="*60)
-        
-        return True
+        # Return next number (increment only once per product, not per tier)
+        return current_number + 1
         
     except Exception as e:
-        print(f"\n[ERROR] Failed to send data to Google Sheets: {e}")
-        import traceback
-        traceback.print_exc()
-        return False
+        print(f"    [ERROR] Failed to append to Google Sheets: {e}")
+        return None
 
 
 # ============================================================================
@@ -716,220 +758,411 @@ def extract_number(text):
     return match.group(0) if match else None
 
 
-def scrape_product_details(page, product_url):
+def highlight_product_in_browser(page, container, asin, product_name=""):
     """
-    Scrape product details from a product detail page
+    Highlight the current product being scraped in the browser for visual feedback
+    Shows green highlight and "SCRAPING..." label on the product
     
     Args:
         page: Playwright page object
-        product_url: URL of the product detail page
-        
-    Returns:
-        Dictionary containing product information, or None if failed
+        container: Product container element
+        asin: Product ASIN for identification
+        product_name: Product name for console logging (optional)
     """
     try:
-        print(f"  [INFO] Opening product page...")
-        page.goto(product_url, wait_until="domcontentloaded", timeout=30000)
-        time.sleep(2)  # Wait for dynamic content to load
+        # Inject JavaScript to highlight this product and log to console
+        page.evaluate(f"""
+            (function() {{
+                // Console logging for tracking
+                console.log('%c🔄 SCRAPING PRODUCT', 'background: #00FF00; color: #000; font-size: 16px; font-weight: bold; padding: 5px;');
+                console.log('ASIN: {asin}');
+                console.log('Name: {product_name[:50] if product_name else "Loading..."}');
+                console.log('─'.repeat(60));
+                
+                // Remove previous highlights
+                document.querySelectorAll('.scraping-highlight').forEach(el => {{
+                    el.classList.remove('scraping-highlight');
+                    el.style.border = '';
+                    el.style.backgroundColor = '';
+                }});
+                
+                // Find and highlight current product
+                const container = document.querySelector('[data-asin="{asin}"]')?.closest('.a-cardui, [data-a-card-type]');
+                if (container) {{
+                    container.classList.add('scraping-highlight');
+                    container.style.border = '4px solid #00FF00';
+                    container.style.backgroundColor = 'rgba(0, 255, 0, 0.1)';
+                    container.style.transition = 'all 0.3s ease';
+                    container.scrollIntoView({{ behavior: 'smooth', block: 'center' }});
+                    
+                    // Add label showing it's being scraped
+                    const label = document.createElement('div');
+                    label.style.cssText = 'position: absolute; top: 5px; left: 5px; background: #00FF00; color: black; padding: 8px 12px; font-weight: bold; z-index: 9999; border-radius: 6px; box-shadow: 0 2px 8px rgba(0,255,0,0.5); animation: pulse 1s infinite;';
+                    label.innerHTML = '<span style="font-size: 14px;">🔄 SCRAPING ASIN: {asin}</span>';
+                    label.className = 'scraping-label';
+                    
+                    // Add pulse animation
+                    if (!document.getElementById('scraping-animation-style')) {{
+                        const style = document.createElement('style');
+                        style.id = 'scraping-animation-style';
+                        style.textContent = `
+                            @keyframes pulse {{
+                                0%, 100% {{ transform: scale(1); }}
+                                50% {{ transform: scale(1.05); }}
+                            }}
+                        `;
+                        document.head.appendChild(style);
+                    }}
+                    
+                    // Remove old label if exists
+                    const oldLabel = document.querySelector('.scraping-label');
+                    if (oldLabel) oldLabel.remove();
+                    
+                    // Make container relative if not already
+                    if (getComputedStyle(container).position === 'static') {{
+                        container.style.position = 'relative';
+                    }}
+                    
+                    container.appendChild(label);
+                    
+                    // Change to "COMPLETE" after scraping
+                    setTimeout(() => {{
+                        if (label.parentNode) {{
+                            label.style.background = '#32CD32';
+                            label.innerHTML = '<span style="font-size: 14px;">✅ COMPLETE</span>';
+                        }}
+                        container.style.border = '2px solid #32CD32';
+                        container.style.backgroundColor = 'rgba(50, 205, 50, 0.05)';
+                    }}, 1500);
+                    
+                    // Remove label after showing complete
+                    setTimeout(() => {{
+                        if (label.parentNode) label.remove();
+                    }}, 3000);
+                }}
+            }})();
+        """)
+        time.sleep(0.3)  # Brief pause to show highlight
+    except Exception as e:
+        # Don't fail scraping if highlight fails
+        pass
+
+
+def scrape_product_from_listing(container):
+    """
+    Scrape product details directly from listing page container
+    Creates multiple rows for quantity-based pricing tiers
+    Uses robust selectors with fallbacks
+    
+    Args:
+        container: Playwright locator for product card container
         
-        product_data = {}
+    Returns:
+        List of dictionaries (one per quantity tier), or empty list if failed
+    """
+    try:
+        products_data = []
+        timestamp = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
         
-        # Extract ASIN from URL (format: /dp/ASIN/ or /gp/product/ASIN)
-        asin_match = re.search(r'/(?:dp|gp/product)/([A-Z0-9]{10})', product_url)
-        product_data['asin'] = asin_match.group(1) if asin_match else ''
-        
-        # Extract Product Name
+        # ===== Extract ASIN (CRITICAL) =====
+        asin = ''
         try:
-            name_elem = page.locator("#productTitle, .a-truncate-cut").first
-            if name_elem.count() > 0:
-                product_data['name'] = name_elem.inner_text().strip()
-            else:
-                product_data['name'] = ''
-        except Exception as e:
-            print(f"    [WARNING] Could not extract product name: {e}")
-            product_data['name'] = ''
-        
-        # Extract Number of Products (quantity)
-        try:
-            # Look for quantity selector or package information
-            quantity_elem = page.locator("#quantity, [name='quantity'], .a-dropdown-prompt").first
-            if quantity_elem.count() > 0:
-                product_data['quantity'] = quantity_elem.inner_text().strip()
-            else:
-                product_data['quantity'] = '1'  # Default to 1
-        except Exception:
-            product_data['quantity'] = '1'
-        
-        # Extract Reference Price (original price before discount)
-        try:
-            # Multiple selectors for reference price
-            ref_price_selectors = [
-                ".a-price.a-text-price",
-                ".basisPrice .a-price .a-offscreen",
-                "[data-a-strike='true'] .a-offscreen",
-                ".a-text-strike .a-offscreen"
+            # Try multiple ways to get ASIN
+            asin_selectors = [
+                '[data-asin]',
+                '[data-asin]:not([data-asin=""])',
+                'div[data-asin]',
+                'section[data-asin]'
             ]
-            ref_price = None
-            for selector in ref_price_selectors:
-                elem = page.locator(selector).first
-                if elem.count() > 0:
-                    ref_price = elem.inner_text().strip()
-                    break
-            product_data['reference_price'] = extract_number(ref_price) if ref_price else ''
-        except Exception as e:
-            print(f"    [WARNING] Could not extract reference price: {e}")
-            product_data['reference_price'] = ''
-        
-        # Extract Current Price (Price per Unit)
-        try:
-            # Multiple selectors for current price
-            price_selectors = [
-                ".a-price.priceToPay .a-offscreen",
-                ".a-price .a-offscreen",
-                "#priceblock_ourprice",
-                "#priceblock_dealprice",
-                ".a-color-price"
-            ]
-            current_price = None
-            for selector in price_selectors:
-                elem = page.locator(selector).first
-                if elem.count() > 0:
-                    current_price = elem.inner_text().strip()
-                    # Skip if this is the reference price
-                    if current_price and "a-text-price" not in selector:
+            for selector in asin_selectors:
+                asin_elem = container.locator(selector).first
+                if asin_elem.count() > 0:
+                    asin = asin_elem.get_attribute('data-asin')
+                    if asin and len(asin) == 10:  # ASIN is always 10 characters
                         break
-            product_data['unit_price'] = extract_number(current_price) if current_price else ''
         except Exception as e:
-            print(f"    [WARNING] Could not extract unit price: {e}")
-            product_data['unit_price'] = ''
+            print(f"    [DEBUG] ASIN extraction error: {e}")
         
-        # Calculate Discount Rate and Amount
+        if not asin:
+            return []  # Can't proceed without ASIN
+        
+        # ===== Extract Product Name (IMPORTANT) =====
+        name = ''
         try:
-            if product_data['reference_price'] and product_data['unit_price']:
-                ref = float(product_data['reference_price'])
-                curr = float(product_data['unit_price'])
-                discount_amount = ref - curr
-                discount_rate = (discount_amount / ref) * 100 if ref > 0 else 0
-                product_data['discount_rate'] = f"{discount_rate:.1f}"
-                product_data['discount_amount'] = f"{discount_amount:.0f}"
-            else:
-                # Try to extract discount percentage directly from page
-                discount_elem = page.locator(".savingsPercentage, .percent-off").first
+            # Try multiple selectors for product name
+            name_selectors = [
+                'span.a-truncate-full.a-offscreen',
+                '.a-truncate-full',
+                'a[title]',  # Fallback: link title attribute
+                'h2 a span'
+            ]
+            for selector in name_selectors:
+                name_elem = container.locator(selector).first
+                if name_elem.count() > 0:
+                    name = name_elem.inner_text().strip()
+                    if name:
+                        break
+            
+            # Fallback: try getting from title attribute
+            if not name:
+                title_elem = container.locator('a[title]').first
+                if title_elem.count() > 0:
+                    name = title_elem.get_attribute('title')
+        except Exception as e:
+            print(f"    [DEBUG] Name extraction error: {e}")
+        
+        # ===== Extract Reference Price (Individual/Retail Price - 個人向け価格) =====
+        reference_price = ''
+        try:
+            # Comprehensive selectors for reference price (strikethrough price)
+            ref_selectors = [
+                '._dmFsd_retailPriceMobileInt_22uHn .a-offscreen',  # Mobile view
+                '._dmFsd_retailPriceInt_HVi7A .a-offscreen',  # Desktop view
+                'span.a-price.a-text-price[data-a-strike="true"] .a-offscreen',
+                '.a-text-price .a-offscreen',
+                'span[data-a-strike="true"] .a-offscreen'
+            ]
+            for selector in ref_selectors:
+                ref_elem = container.locator(selector).first
+                if ref_elem.count() > 0:
+                    ref_text = ref_elem.inner_text().strip()
+                    reference_price = extract_number(ref_text)
+                    if reference_price:
+                        break
+        except Exception as e:
+            print(f"    [DEBUG] Reference price extraction error: {e}")
+        
+        # ===== Extract Base Discount Rate (from badge or savings text) =====
+        discount_rate_base = ''
+        try:
+            discount_selectors = [
+                'span._dmFsd_savingsBadge_25xkz',  # Badge at top
+                'span._dmFsd_businessSavingsMobileInt_2V1aF',  # Mobile savings
+                'div._dmFsd_businessSavingsInt_2W0Iq',  # Desktop savings
+                'span:has-text("OFF")',  # Any span with "OFF" text
+                'span:has-text("%")'  # Any span with percentage
+            ]
+            for selector in discount_selectors:
+                discount_elem = container.locator(selector).first
                 if discount_elem.count() > 0:
                     discount_text = discount_elem.inner_text().strip()
-                    discount_num = extract_number(discount_text)
-                    product_data['discount_rate'] = discount_num if discount_num else ''
-                else:
-                    product_data['discount_rate'] = ''
-                product_data['discount_amount'] = ''
+                    discount_rate_base = extract_number(discount_text)
+                    if discount_rate_base:
+                        break
         except Exception as e:
-            print(f"    [WARNING] Could not calculate discount: {e}")
-            product_data['discount_rate'] = ''
-            product_data['discount_amount'] = ''
+            print(f"    [DEBUG] Discount rate extraction error: {e}")
         
-        print(f"    [SUCCESS] Scraped: {product_data['name'][:50]}...")
-        return product_data
+        # ===== Extract Quantity Tiers (KEY FEATURE) =====
+        quantity_tiers = []
+        try:
+            # Find quantity picker items (hidden dropdown with data attributes)
+            tier_items = container.locator('ul._dmFsd_qpDropdown_2UuXs li._dmFsd_qpItem_3tHmj').all()
+            
+            for tier_item in tier_items:
+                try:
+                    # Extract quantity (minimum quantity for this tier)
+                    quantity = tier_item.get_attribute('data-minimum-quantity')
+                    
+                    # Extract price for this tier (numeric value without formatting)
+                    tier_price = tier_item.get_attribute('data-numeric-value')
+                    
+                    if quantity and tier_price:
+                        # Clean up the price value
+                        tier_price_clean = tier_price.replace(',', '').replace('.00', '')
+                        quantity_tiers.append({
+                            'quantity': quantity,
+                            'unit_price': tier_price_clean
+                        })
+                except Exception:
+                    continue
+        except Exception as e:
+            print(f"    [DEBUG] Quantity tiers extraction error: {e}")
+        
+        # ===== Fallback: If no quantity tiers found, get base price =====
+        if not quantity_tiers:
+            base_price = ''
+            try:
+                base_price_selectors = [
+                    'span.a-price._dmFsd_businessPriceMobileInt_3u3XJ .a-offscreen',  # Mobile business price
+                    'span.a-price._dmFsd_businessPriceInt_oPUj8 .a-offscreen',  # Desktop business price
+                    'span.a-price .a-offscreen:not([data-a-strike="true"])',  # Any non-strikethrough price
+                    'span.a-price-whole'  # Price whole number
+                ]
+                for selector in base_price_selectors:
+                    price_elem = container.locator(selector).first
+                    if price_elem.count() > 0:
+                        price_text = price_elem.inner_text().strip()
+                        base_price = extract_number(price_text)
+                        if base_price:
+                            break
+            except Exception as e:
+                print(f"    [DEBUG] Base price extraction error: {e}")
+            
+            # Create single tier with quantity 1
+            if base_price:
+                quantity_tiers.append({
+                    'quantity': '1',
+                    'unit_price': base_price
+                })
+        
+        # ===== Build Product Data Rows (one per quantity tier) =====
+        for idx, tier in enumerate(quantity_tiers):
+            # Only fill product info (timestamp, ASIN, name) for the FIRST tier
+            # Subsequent tiers have these fields blank
+            product_data = {
+                'created_time': timestamp if idx == 0 else '',
+                'asin': asin if idx == 0 else '',
+                'name': name if idx == 0 else '',
+                'quantity': tier['quantity'],
+                'reference_price': reference_price,
+                'unit_price': tier['unit_price'],
+                'discount_rate': '',
+                'discount_amount': '',
+                'is_first_tier': idx == 0  # Flag to track first row for numbering
+            }
+            
+            # Calculate discount rate and amount for this tier
+            if reference_price and tier['unit_price']:
+                try:
+                    ref = float(reference_price)
+                    curr = float(tier['unit_price'])
+                    discount_amount = ref - curr
+                    discount_rate = (discount_amount / ref) * 100 if ref > 0 else 0
+                    product_data['discount_rate'] = f"{discount_rate:.1f}"
+                    product_data['discount_amount'] = f"{discount_amount:.0f}"
+                except Exception:
+                    product_data['discount_rate'] = discount_rate_base if discount_rate_base else ''
+                    product_data['discount_amount'] = ''
+            else:
+                product_data['discount_rate'] = discount_rate_base if discount_rate_base else ''
+                product_data['discount_amount'] = ''
+            
+            products_data.append(product_data)
+        
+        return products_data
         
     except Exception as e:
-        print(f"    [ERROR] Failed to scrape product: {e}")
-        return None
+        print(f"    [ERROR] Failed to scrape product from listing: {e}")
+        import traceback
+        traceback.print_exc()
+        return []
 
 
-def scrape_all_products(page, context):
+def scrape_all_products(page, worksheet, current_number):
     """
-    Scrape all products from the filtered results page
-    Scrolls gradually and scrapes products as they appear
-    Opens each product in a new tab, scrapes data, and closes tab
+    Scrape all products directly from the filtered results page
+    Sends each product to Google Sheets IMMEDIATELY after scraping (real-time)
+    Scrolls gradually and scrapes products as they appear (NO separate page opens)
+    Creates multiple rows for products with quantity-based pricing tiers
     
     Args:
         page: Playwright page object
-        context: Playwright browser context
+        worksheet: gspread worksheet object for real-time updates
+        current_number: Starting product number for sequential numbering
         
     Returns:
-        List of product data dictionaries
+        Number of unique products scraped
     """
     print("\n" + "="*60)
-    print("STEP 4: SCRAPING PRODUCT DATA (SCROLL & SCRAPE)")
+    print("STEP 4: SCRAPING & SENDING TO SHEETS (REAL-TIME)")
     print("="*60)
     
     try:
-        products_data = []
-        scraped_urls = set()  # Track already scraped products
+        scraped_asins = set()  # Track already scraped ASINs
+        total_rows_sent = 0  # Track total rows sent
         scroll_count = 0
-        max_scrolls = 20  # Maximum number of scrolls
         no_new_products_count = 0  # Counter for consecutive scrolls with no new products
+        max_consecutive_no_products = 5  # Stop after 5 scrolls with no new products
         
-        print("\n[INFO] Starting scroll-and-scrape process...")
-        print("[INFO] Products will be scraped as they appear during scrolling")
-        print("="*60)
+        print("\n[INFO] Starting real-time scrape-and-send process...")
+        print("[INFO] Each product sent to Google Sheets immediately after scraping")
+        print("[INFO] Products scraped directly from listing (no page opens)")
+        print("[INFO] Multiple rows created for quantity-based pricing")
+        print("[INFO] Will continue until no more products are found")
+        print("="*60 + "\n")
         
-        while scroll_count < max_scrolls:
+        while True:  # Scrape until no more products found
             # Find currently visible product containers
-            product_containers = page.locator(".sg-product-gallery-item, [data-component-type='s-search-result']").all()
+            # Robust selector: try multiple patterns
+            product_containers = page.locator("div.a-cardui._dmFsd_cardItem_1LFgv[data-a-card-type='basic']").all()
+            
+            # Fallback selector if primary doesn't work
+            if len(product_containers) == 0:
+                product_containers = page.locator("div.a-cardui._dmFsd_cardItem_1LFgv").all()
             
             if len(product_containers) == 0:
-                print(f"\n[Scroll {scroll_count + 1}] No products found yet, scrolling...")
+                print(f"[Scroll {scroll_count + 1}] No product containers found yet, scrolling...")
                 page.mouse.wheel(0, 500)
                 time.sleep(1.5)
                 scroll_count += 1
+                
+                # Safeguard: don't scroll infinitely if page structure changed
+                if scroll_count > 50:
+                    print("\n[WARNING] Scrolled 50 times without finding products. Stopping.")
+                    print("[INFO] Page structure may have changed. Please check selectors.")
+                    break
                 continue
             
-            # Extract URLs from visible containers
-            new_urls = []
+            # Scrape new products from visible containers
+            new_products_found = 0
+            
             for container in product_containers:
                 try:
-                    # Find product link
-                    link = container.locator("h2 a, .a-link-normal[href*='/dp/'], .a-link-normal[href*='/gp/product/']").first
-                    if link.count() > 0:
-                        url = link.get_attribute("href")
-                        if url:
-                            # Convert relative URL to absolute
-                            if url.startswith('/'):
-                                url = f"https://www.amazon.co.jp{url}"
+                    # Check if this container has an ASIN (to verify it's a product)
+                    asin_elem = container.locator('[data-asin]').first
+                    if asin_elem.count() == 0:
+                        continue
+                    
+                    asin = asin_elem.get_attribute('data-asin')
+                    if not asin or asin in scraped_asins or len(asin) != 10:
+                        continue
+                    
+                    # Mark as scraped
+                    scraped_asins.add(asin)
+                    
+                    # Scrape product data first (to get name for highlight)
+                    product_rows = scrape_product_from_listing(container)
+                    
+                    if product_rows:
+                        # Get product name from first row
+                        first_row = product_rows[0]
+                        product_name = first_row.get('name', 'Unknown')
+                        
+                        # Highlight this product in the browser (visual feedback)
+                        highlight_product_in_browser(page, container, asin, product_name)
+                        
+                        # Send to Google Sheets IMMEDIATELY
+                        new_number = append_product_to_sheets(worksheet, product_rows, current_number)
+                        
+                        if new_number:
+                            # Success!
+                            new_products_found += 1
+                            total_rows_sent += len(product_rows)
+                            current_number = new_number
                             
-                            # Only add if not already scraped
-                            if url not in scraped_urls:
-                                new_urls.append(url)
-                                scraped_urls.add(url)
-                except Exception:
+                            # Show progress in terminal
+                            print(f"  ✓ [{current_number - 1}] {asin} - {product_name[:50]}... ({len(product_rows)} tiers) → SENT")
+                        else:
+                            print(f"  ✗ Failed to send ASIN {asin} to sheets")
+                    else:
+                        print(f"  ⚠ No data extracted for ASIN {asin}")
+                    
+                except Exception as e:
+                    print(f"  ✗ Error processing container: {e}")
                     continue
             
-            # Scrape new products found in this batch
-            if new_urls:
+            # Check if we found new products in this scroll
+            if new_products_found > 0:
                 no_new_products_count = 0  # Reset counter
-                print(f"\n[Scroll {scroll_count + 1}] Found {len(new_urls)} new products to scrape")
-                print(f"[INFO] Total products discovered so far: {len(scraped_urls)}")
-                
-                for i, url in enumerate(new_urls):
-                    print(f"\n  [{len(products_data) + 1}] Scraping product...")
-                    
-                    # Open product in new tab
-                    new_page = context.new_page()
-                    
-                    try:
-                        # Scrape product details
-                        product_data = scrape_product_details(new_page, url)
-                        
-                        if product_data:
-                            products_data.append(product_data)
-                            print(f"    [SUCCESS] Scraped: {product_data.get('name', 'Unknown')[:60]}...")
-                        else:
-                            print(f"    [WARNING] Failed to scrape product")
-                        
-                    except Exception as e:
-                        print(f"    [ERROR] Error: {e}")
-                    
-                    finally:
-                        # Close the product tab
-                        new_page.close()
-                        time.sleep(0.8)  # Polite delay between requests
+                print(f"\n[Scroll {scroll_count + 1}] Processed {new_products_found} new products")
+                print(f"[INFO] Total: {len(scraped_asins)} products | {total_rows_sent} rows sent to sheets\n")
             else:
                 no_new_products_count += 1
-                print(f"\n[Scroll {scroll_count + 1}] No new products found")
+                print(f"[Scroll {scroll_count + 1}] No new products found")
                 
-                # If no new products found in 3 consecutive scrolls, we've reached the end
-                if no_new_products_count >= 3:
-                    print("\n[INFO] No new products found after 3 scrolls - reached end of results")
+                # If no new products found in consecutive scrolls, we've reached the end
+                if no_new_products_count >= max_consecutive_no_products:
+                    print(f"\n[INFO] No new products found after {max_consecutive_no_products} consecutive scrolls - reached end of results")
                     break
             
             # Scroll down to load more products
@@ -938,21 +1171,21 @@ def scrape_all_products(page, context):
             time.sleep(1.5)  # Wait for lazy loading
             scroll_count += 1
         
-        if scroll_count >= max_scrolls:
-            print(f"\n[INFO] Reached maximum scroll limit ({max_scrolls} scrolls)")
-        
         print("\n" + "="*60)
-        print(f"[SUCCESS] Scraped {len(products_data)} products successfully")
+        print(f"[SUCCESS] Scraping & sending completed!")
+        print(f"[INFO] Unique products: {len(scraped_asins)}")
+        print(f"[INFO] Total rows sent: {total_rows_sent}")
         print(f"[INFO] Total scrolls: {scroll_count}")
+        print(f"[INFO] View at: {SPREADSHEET_URL}")
         print("="*60)
         
-        return products_data
+        return len(scraped_asins)
         
     except Exception as e:
         print(f"\n[ERROR] Failed to scrape products: {e}")
         import traceback
         traceback.print_exc()
-        return products_data  # Return whatever we've scraped so far
+        return len(scraped_asins) if scraped_asins else 0
 
 
 def login_to_amazon(page, context):
@@ -1477,7 +1710,7 @@ def apply_filters_and_sort(page):
         print(f"  ✓ Discount: {MIN_DISCOUNT_PERCENT}%+")
         print(f"  ✓ Sort: Business Discount (Descending)")
         print("="*60)
-        print("\n[INFO] Products will be scraped while scrolling (no pre-scroll)")
+        print("\n[INFO] Products will be scraped while scrolling until all products are found")
         
         return True
         
@@ -1609,42 +1842,51 @@ def run_automation():
 
             apply_filters_and_sort(page)
 
-            # MILESTONE 2: Scrape product data (scroll and scrape simultaneously)
+            # MILESTONE 2: Initialize Google Sheets and scrape products (real-time sending)
             print("\n" + "="*60)
-            print("STEP: SCRAPING PRODUCTS (MILESTONE 2)")
+            print("STEP: INITIALIZING GOOGLE SHEETS")
             print("="*60)
-            products_data = scrape_all_products(page, context)
             
-            if len(products_data) == 0:
-                print("\n[WARNING] No products were scraped. Skipping Google Sheets export.")
+            gc, worksheet, current_number = initialize_google_sheets()
+            
+            if not worksheet:
+                print("\n[ERROR] Failed to initialize Google Sheets.")
                 print("[INFO] Closing browser...")
                 browser.close()
                 return False
             
-            # Send data to Google Sheets
-            print("\n" + "="*60)
-            print("STEP: EXPORTING TO GOOGLE SHEETS")
-            print("="*60)
-            sheets_success = send_to_google_sheets(products_data)
+            print(f"[SUCCESS] Google Sheets initialized")
+            print(f"[INFO] Starting product number: {current_number}")
+            print(f"[INFO] Spreadsheet: {SPREADSHEET_URL}")
             
-            if sheets_success:
-                print("\n" + "="*70)
-                print(" "*15 + "✓ ALL MILESTONES COMPLETED ✓")
-                print("="*70)
-                print(f"[SUCCESS] Scraped {len(products_data)} products")
-                print(f"[SUCCESS] Data exported to Google Sheets")
-                print(f"[INFO] View at: {SPREADSHEET_URL}")
-                print("="*70)
-            else:
-                print("\n[WARNING] Failed to export data to Google Sheets")
-                print(f"[INFO] However, {len(products_data)} products were successfully scraped")
+            # Scrape products and send to sheets in real-time
+            print("\n" + "="*60)
+            print("STEP: SCRAPING PRODUCTS (MILESTONE 2)")
+            print("="*60)
+            
+            unique_products = scrape_all_products(page, worksheet, current_number)
+            
+            if unique_products == 0:
+                print("\n[WARNING] No products were scraped.")
+                print("[INFO] Closing browser...")
+                browser.close()
+                return False
+            
+            # Success message
+            print("\n" + "="*70)
+            print(" "*15 + "✓ ALL MILESTONES COMPLETED ✓")
+            print("="*70)
+            print(f"[SUCCESS] Scraped and sent {unique_products} products to Google Sheets")
+            print(f"[INFO] Data sent in real-time (row by row)")
+            print(f"[INFO] View at: {SPREADSHEET_URL}")
+            print("="*70)
 
             # Close browser immediately after completion
             print("\n[INFO] Closing browser...")
             browser.close()
             print("[SUCCESS] Browser closed")
             
-            return sheets_success
+            return True  # Success if we got here
 
         except Exception as e:
             print(f"\n[ERROR] Automation failed: {e}")
@@ -1678,8 +1920,10 @@ def main():
     print("    5. Select product categories")
     print("    6. Display product list")
     print("  Milestone 2:")
-    print("    7. Scrape product data (ASIN, name, price, discount, etc.)")
-    print("    8. Send data to Google Sheets")
+    print("    7. Initialize Google Sheets connection")
+    print("    8. Scrape products and send to Sheets IMMEDIATELY (real-time)")
+    print("    9. Each product sent row-by-row as it's scraped")
+    print("    10. Continue until no more products found")
     print("="*70 + "\n")
     
     # Check if Gmail credentials exist
