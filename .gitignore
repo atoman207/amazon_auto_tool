@@ -20,6 +20,7 @@ amazon_session.json
 data/client_secret_*.json
 token.json
 sheets_token.json
+sheets_token_category.json
 
 # IDE
 .vscode/
