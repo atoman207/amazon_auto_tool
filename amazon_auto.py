@@ -955,25 +955,69 @@ def scrape_product_from_listing(container):
         # ===== Extract Quantity Tiers (KEY FEATURE) =====
         quantity_tiers = []
         try:
+            # First, try to ensure the quantity dropdown is accessible
+            # Some dropdowns might need to be expanded first
+            quantity_picker = container.locator('div._dmFsd_quantityPicker_s7cKy').first
+            if quantity_picker.count() == 0:
+                print(f"    [DEBUG] No quantity picker found for ASIN {asin}")
+            
+            # IMPORTANT: Check for "Load More" button (さらに読み込む) and click it to reveal all tiers
+            # The button appears when there are more quantity tiers to load
+            load_more_button = container.locator('div._dmFsd_qpLoadMoreBtn_1uSIC, button:has-text("さらに読み込む")').first
+            if load_more_button.count() > 0:
+                try:
+                    # Check if button is visible and clickable (not display:none)
+                    if load_more_button.is_visible(timeout=500):
+                        print(f"    [INFO] Found 'Load More' button - clicking to reveal all quantity tiers for ASIN {asin}")
+                        load_more_button.scroll_into_view_if_needed(timeout=2000)
+                        load_more_button.click(timeout=2000)
+                        time.sleep(0.8)  # Wait for additional tiers to load
+                        print(f"    [SUCCESS] Loaded additional quantity tiers")
+                except Exception as e:
+                    print(f"    [DEBUG] Load More button not clickable or not visible: {e}")
+            
             # Find quantity picker items (hidden dropdown with data attributes)
             tier_items = container.locator('ul._dmFsd_qpDropdown_2UuXs li._dmFsd_qpItem_3tHmj').all()
             
             for tier_item in tier_items:
                 try:
                     # Extract quantity (minimum quantity for this tier)
-                    quantity = tier_item.get_attribute('data-minimum-quantity')
+                    # IMPORTANT: Read from nested div FIRST (the <li> element always has "1")
+                    quantity = None
+                    
+                    # Primary method: Get from visible text to preserve "+" symbol
+                    # This captures "1", "2+", "5+", "10+", "15+", "20+" exactly as displayed
+                    quantity_text = tier_item.locator('div._dmFsd_qpItemQuantity_3S1pu span').first
+                    if quantity_text.count() > 0:
+                        text = quantity_text.inner_text().strip()
+                        # Keep the text as-is to preserve "+" symbol (e.g., "2+", "5+", "10+")
+                        quantity = text
+                    
+                    # Fallback: Get from data attribute (but this loses the "+" symbol)
+                    if not quantity:
+                        quantity_div = tier_item.locator('div._dmFsd_qpItemQuantity_3S1pu').first
+                        if quantity_div.count() > 0:
+                            quantity = quantity_div.get_attribute('data-minimum-quantity')
+                    
+                    # Fallback 2: Try from <li> element (though this is usually wrong)
+                    if not quantity:
+                        quantity = tier_item.get_attribute('data-minimum-quantity')
                     
                     # Extract price for this tier (numeric value without formatting)
                     tier_price = tier_item.get_attribute('data-numeric-value')
                     
                     if quantity and tier_price:
-                        # Clean up the price value
+                        # Clean up the price value and add ¥ symbol
                         tier_price_clean = tier_price.replace(',', '').replace('.00', '')
+                        tier_price_with_yen = f"¥{tier_price_clean}"
+                        
                         quantity_tiers.append({
                             'quantity': quantity,
-                            'unit_price': tier_price_clean
+                            'unit_price': tier_price_with_yen
                         })
-                except Exception:
+                        print(f"      [DEBUG] Tier found: Qty={quantity}, Price={tier_price_with_yen}")
+                except Exception as e:
+                    print(f"      [DEBUG] Error extracting tier: {e}")
                     continue
         except Exception as e:
             print(f"    [DEBUG] Quantity tiers extraction error: {e}")
@@ -1002,39 +1046,53 @@ def scrape_product_from_listing(container):
             if base_price:
                 quantity_tiers.append({
                     'quantity': '1',
-                    'unit_price': base_price
+                    'unit_price': f"¥{base_price}"
                 })
         
         # ===== Build Product Data Rows (one per quantity tier) =====
+        if not quantity_tiers:
+            print(f"    [WARNING] No quantity tiers found for ASIN {asin}")
+        else:
+            print(f"    [INFO] Found {len(quantity_tiers)} quantity tiers for ASIN {asin}")
+        
         for idx, tier in enumerate(quantity_tiers):
+            # Debug: Show what's in each tier
+            print(f"      Tier {idx+1}: Qty={tier.get('quantity', 'MISSING')}, Price={tier.get('unit_price', 'MISSING')}")
+            
+            # Add ¥ symbol to reference price if it exists
+            reference_price_with_yen = f"¥{reference_price}" if reference_price else ''
+            
             # Only fill product info (timestamp, ASIN, name) for the FIRST tier
             # Subsequent tiers have these fields blank
             product_data = {
                 'created_time': timestamp if idx == 0 else '',
                 'asin': asin if idx == 0 else '',
                 'name': name if idx == 0 else '',
-                'quantity': tier['quantity'],
-                'reference_price': reference_price,
-                'unit_price': tier['unit_price'],
+                'quantity': tier.get('quantity', ''),  # Use .get() for safety
+                'reference_price': reference_price_with_yen,
+                'unit_price': tier.get('unit_price', ''),  # Already has ¥ symbol from extraction
                 'discount_rate': '',
                 'discount_amount': '',
                 'is_first_tier': idx == 0  # Flag to track first row for numbering
             }
             
             # Calculate discount rate and amount for this tier
-            if reference_price and tier['unit_price']:
+            tier_unit_price = tier.get('unit_price', '')
+            if reference_price and tier_unit_price:
                 try:
                     ref = float(reference_price)
-                    curr = float(tier['unit_price'])
+                    # Remove ¥ symbol from unit price for calculation
+                    curr = float(tier_unit_price.replace('¥', '').replace(',', ''))
                     discount_amount = ref - curr
                     discount_rate = (discount_amount / ref) * 100 if ref > 0 else 0
-                    product_data['discount_rate'] = f"{discount_rate:.1f}"
-                    product_data['discount_amount'] = f"{discount_amount:.0f}"
-                except Exception:
-                    product_data['discount_rate'] = discount_rate_base if discount_rate_base else ''
+                    product_data['discount_rate'] = f"{discount_rate:.1f}%"
+                    product_data['discount_amount'] = f"¥{discount_amount:.0f}"
+                except Exception as e:
+                    print(f"      [DEBUG] Discount calculation error: {e}")
+                    product_data['discount_rate'] = f"{discount_rate_base}%" if discount_rate_base else ''
                     product_data['discount_amount'] = ''
             else:
-                product_data['discount_rate'] = discount_rate_base if discount_rate_base else ''
+                product_data['discount_rate'] = f"{discount_rate_base}%" if discount_rate_base else ''
                 product_data['discount_amount'] = ''
             
             products_data.append(product_data)
@@ -1140,8 +1198,10 @@ def scrape_all_products(page, worksheet, current_number):
                             total_rows_sent += len(product_rows)
                             current_number = new_number
                             
-                            # Show progress in terminal
-                            print(f"  ✓ [{current_number - 1}] {asin} - {product_name[:50]}... ({len(product_rows)} tiers) → SENT")
+                            # Show progress in terminal with quantity details
+                            quantities = [row.get('quantity', '?') for row in product_rows]
+                            print(f"  ✓ [{current_number - 1}] {asin} - {product_name[:50]}...")
+                            print(f"     Quantities: {', '.join(quantities)} → {len(product_rows)} rows SENT")
                         else:
                             print(f"  ✗ Failed to send ASIN {asin} to sheets")
                     else:
@@ -1160,15 +1220,60 @@ def scrape_all_products(page, worksheet, current_number):
                 no_new_products_count += 1
                 print(f"[Scroll {scroll_count + 1}] No new products found")
                 
+                # Check if we've reached the end of results
+                # Look for "end of results" indicator or pagination buttons
+                try:
+                    # Check if there's a "no more results" message
+                    end_message = page.locator('text=/結果はありません|これ以上の結果はありません|No more results/i').first
+                    if end_message.count() > 0:
+                        print("\n[INFO] Reached end of results (end message detected)")
+                        break
+                    
+                    # Check for pagination - if there's a "Next" button, click it
+                    next_button = page.locator('a.s-pagination-next:not(.s-pagination-disabled), li.a-last:not(.a-disabled) a').first
+                    if next_button.count() > 0 and next_button.is_visible(timeout=1000):
+                        print("\n[INFO] Found 'Next Page' button - clicking to load more products...")
+                        next_button.click()
+                        time.sleep(3)  # Wait for next page to load
+                        no_new_products_count = 0  # Reset counter after loading new page
+                        continue
+                except Exception:
+                    pass
+                
                 # If no new products found in consecutive scrolls, we've reached the end
                 if no_new_products_count >= max_consecutive_no_products:
                     print(f"\n[INFO] No new products found after {max_consecutive_no_products} consecutive scrolls - reached end of results")
-                    break
+                    
+                    # Final check: scroll to bottom and verify we're truly at the end
+                    print("[INFO] Performing final verification scroll to confirm end of results...")
+                    page.evaluate("window.scrollTo(0, document.body.scrollHeight)")
+                    time.sleep(2)
+                    
+                    # Check one more time for new products
+                    final_check_containers = page.locator("div.a-cardui._dmFsd_cardItem_1LFgv[data-a-card-type='basic']").all()
+                    final_new_found = 0
+                    for container in final_check_containers:
+                        try:
+                            asin_elem = container.locator('[data-asin]').first
+                            if asin_elem.count() > 0:
+                                asin = asin_elem.get_attribute('data-asin')
+                                if asin and asin not in scraped_asins and len(asin) == 10:
+                                    final_new_found += 1
+                                    break
+                        except:
+                            continue
+                    
+                    if final_new_found > 0:
+                        print(f"[INFO] Found {final_new_found} more products on final check - continuing...")
+                        no_new_products_count = 0
+                    else:
+                        print("[SUCCESS] Confirmed - no more products available")
+                        break
             
             # Scroll down to load more products
             print(f"[INFO] Scrolling down to load more products...")
-            page.mouse.wheel(0, 500)
-            time.sleep(1.5)  # Wait for lazy loading
+            page.mouse.wheel(0, 800)  # Increased scroll distance for faster loading
+            time.sleep(2)  # Increased wait time for lazy loading
             scroll_count += 1
         
         print("\n" + "="*60)

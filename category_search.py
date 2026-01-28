@@ -56,6 +56,19 @@ except ImportError as e:
     print("="*70 + "\n")
     sys.exit(1)
 
+try:
+    import gspread
+except ImportError as e:
+    print("\n" + "="*70)
+    print("[ERROR] gspread is not installed!")
+    print("="*70)
+    print("Please install it by running:")
+    print("  pip install gspread")
+    print("="*70)
+    print(f"Detailed error: {e}")
+    print("="*70 + "\n")
+    sys.exit(1)
+
 # ============================================================================
 # CONFIGURATION
 # ============================================================================
@@ -79,8 +92,18 @@ if not AMAZON_PASSWORD:
 
 # Gmail API settings
 GMAIL_SCOPES = ['https://www.googleapis.com/auth/gmail.readonly']
-GMAIL_CREDENTIALS_FILE = Path('data/client_secret_446842116198-amdijg8d7tb7rff25o4514r19pp1d8o9.apps.googleusercontent.com.json')
+GMAIL_CREDENTIALS_FILE = Path('data/client_secret_446842116198-nke8rjis6iaeuagepsp9p5gvbsu2cte4.apps.googleusercontent.com.json')
 GMAIL_TOKEN_FILE = Path('token.json')
+
+# Google Sheets API settings
+SHEETS_SCOPES = [
+    'https://www.googleapis.com/auth/gmail.readonly',
+    'https://www.googleapis.com/auth/spreadsheets'
+]
+SHEETS_CREDENTIALS_FILE = GMAIL_CREDENTIALS_FILE  # Use same OAuth credentials
+SHEETS_TOKEN_FILE = Path('sheets_token_category.json')  # Separate token file for category search
+SPREADSHEET_URL = "https://docs.google.com/spreadsheets/d/15GGtWSP1sdKXLUl9w0IB2fSfUHQoui5W3kWxG57-eEA/edit?hl=ja&gid=0#gid=0"
+SPREADSHEET_ID = "15GGtWSP1sdKXLUl9w0IB2fSfUHQoui5W3kWxG57-eEA"  # Extracted from URL
 
 # Session file
 SESSION_FILE = "amazon_session.json"
@@ -445,6 +468,178 @@ def get_amazon_otp_from_gmail(max_age_minutes=5, max_retries=12, retry_delay=5):
 
 
 # ============================================================================
+# GOOGLE SHEETS API FUNCTIONS
+# ============================================================================
+
+def get_sheets_service():
+    """
+    Authenticate and return Google Sheets API service using gspread
+    
+    Returns:
+        gspread client object
+    """
+    creds = None
+    
+    # Load existing token if available
+    if SHEETS_TOKEN_FILE.exists():
+        try:
+            creds = Credentials.from_authorized_user_file(str(SHEETS_TOKEN_FILE), SHEETS_SCOPES)
+        except Exception as e:
+            print(f"[WARNING] Could not load Sheets token: {e}")
+            creds = None
+    
+    # If no valid credentials, do OAuth flow
+    if not creds or not creds.valid:
+        if creds and creds.expired and creds.refresh_token:
+            print("[INFO] Refreshing expired Sheets token...")
+            try:
+                creds.refresh(Request())
+            except Exception as e:
+                print(f"[WARNING] Token refresh failed: {e}")
+                creds = None
+        
+        if not creds:
+            if not SHEETS_CREDENTIALS_FILE.exists():
+                raise FileNotFoundError(
+                    f"\n[ERROR] Google credentials file not found: {SHEETS_CREDENTIALS_FILE}\n"
+                    "Please download OAuth credentials from Google Cloud Console."
+                )
+            
+            print("\n" + "="*60)
+            print("GOOGLE SHEETS API AUTHORIZATION REQUIRED")
+            print("="*60)
+            print("A browser window will open for Google authorization.")
+            print("="*60 + "\n")
+            
+            flow = InstalledAppFlow.from_client_secrets_file(
+                str(SHEETS_CREDENTIALS_FILE), SHEETS_SCOPES
+            )
+            creds = flow.run_local_server(port=0)
+            
+            # Save credentials for future use
+            SHEETS_TOKEN_FILE.write_text(creds.to_json())
+            print(f"[SUCCESS] Sheets token saved to {SHEETS_TOKEN_FILE}")
+    
+    # Return gspread client
+    return gspread.authorize(creds)
+
+
+def initialize_google_sheets():
+    """
+    Initialize Google Sheets connection and ensure headers are present
+    
+    Returns:
+        Tuple of (gspread_client, worksheet, current_row_number) or (None, None, None) if failed
+    """
+    try:
+        # Authenticate with Google Sheets
+        gc = get_sheets_service()
+        
+        # Open the spreadsheet
+        spreadsheet = gc.open_by_key(SPREADSHEET_ID)
+        worksheet = spreadsheet.sheet1  # Use first sheet
+        
+        # Read existing data to find the last row number
+        existing_data = worksheet.get_all_values()
+        
+        # Prepare header row (Japanese to match existing spreadsheet)
+        headers = [
+            "No",
+            "created_time",
+            "検索キーワード",  # Search Keyword
+            "ASIN",
+            "商品名",
+            "商品数",
+            "参考価格",
+            "数量別価格 （円）",
+            "割引率（％）",
+            "割引額（円）"
+        ]
+        
+        # Determine starting row number
+        if len(existing_data) == 0:
+            # No data at all - write headers and start from 1
+            worksheet.update('A1', [headers])
+            current_number = 1
+        elif len(existing_data) == 1:
+            # Only headers exist - start from 1
+            # Update headers if they don't match
+            if existing_data[0] != headers:
+                worksheet.update('A1', [headers])
+            current_number = 1
+        else:
+            # Data exists - find the last number and continue from there
+            # Update headers if they don't match
+            if existing_data[0] != headers:
+                worksheet.update('A1', [headers])
+            
+            # Find the last row number
+            last_row_data = existing_data[-1]
+            try:
+                # Try to get the number from the first column
+                last_number = int(last_row_data[0]) if last_row_data[0] else 0
+            except (ValueError, IndexError):
+                # If we can't parse it, count the rows
+                last_number = len(existing_data) - 1
+            
+            current_number = last_number + 1
+        
+        return gc, worksheet, current_number
+        
+    except Exception as e:
+        print(f"\n[ERROR] Failed to initialize Google Sheets: {e}")
+        import traceback
+        traceback.print_exc()
+        return None, None, None
+
+
+def append_product_to_sheets(worksheet, product_rows, current_number, keyword=""):
+    """
+    Append a single product (with all its quantity tiers) to Google Sheets immediately
+    Includes the search keyword
+    
+    Args:
+        worksheet: gspread worksheet object
+        product_rows: List of dictionaries for this product (one per quantity tier)
+        current_number: Current sequential product number
+        keyword: Search keyword used to find this product
+        
+    Returns:
+        Next product number to use, or None if failed
+    """
+    try:
+        rows = []
+        
+        for idx, product in enumerate(product_rows):
+            # Check if this is the first tier of the product
+            is_first_tier = product.get('is_first_tier', idx == 0)
+            
+            row = [
+                current_number if is_first_tier else '',  # Sequential number (only for first tier)
+                product.get('created_time', ''),  # Timestamp (already blank for non-first tiers)
+                keyword if is_first_tier else '',  # Search keyword (only for first tier)
+                product.get('asin', ''),  # ASIN (already blank for non-first tiers)
+                product.get('name', ''),  # Name (already blank for non-first tiers)
+                product.get('quantity', ''),
+                product.get('reference_price', ''),
+                product.get('unit_price', ''),
+                product.get('discount_rate', ''),
+                product.get('discount_amount', '')
+            ]
+            rows.append(row)
+        
+        # Append rows for this product
+        worksheet.append_rows(rows)
+        
+        # Return next number (increment only once per product, not per tier)
+        return current_number + 1
+        
+    except Exception as e:
+        print(f"    [ERROR] Failed to append to Google Sheets: {e}")
+        return None
+
+
+# ============================================================================
 # BROWSER AUTOMATION FUNCTIONS
 # ============================================================================
 
@@ -598,17 +793,381 @@ def check_and_navigate_next_page(page):
         return False
 
 
-def search_and_display_products(page, keyword):
+def extract_number(text):
+    """Extract numeric value from text (handles Japanese currency format)"""
+    if not text:
+        return None
+    # Remove currency symbols, commas, and extract number
+    cleaned = re.sub(r'[¥,円JPY\s]', '', text)
+    match = re.search(r'\d+(?:\.\d+)?', cleaned)
+    return match.group(0) if match else None
+
+
+def highlight_product_in_browser(page, container, asin, product_name=""):
     """
-    Search for a keyword and display all products with pagination
+    Highlight the current product being scraped in the browser for visual feedback
+    Shows green highlight and "SCRAPING..." label on the product
+    
+    Args:
+        page: Playwright page object
+        container: Product container element
+        asin: Product ASIN for identification
+        product_name: Product name for console logging (optional)
+    """
+    try:
+        # Inject JavaScript to highlight this product and log to console
+        page.evaluate(f"""
+            (function() {{
+                // Console logging for tracking
+                console.log('%c🔄 SCRAPING PRODUCT', 'background: #00FF00; color: #000; font-size: 16px; font-weight: bold; padding: 5px;');
+                console.log('ASIN: {asin}');
+                console.log('Name: {product_name[:50] if product_name else "Loading..."}');
+                console.log('─'.repeat(60));
+                
+                // Remove previous highlights
+                document.querySelectorAll('.scraping-highlight').forEach(el => {{
+                    el.classList.remove('scraping-highlight');
+                    el.style.border = '';
+                    el.style.backgroundColor = '';
+                }});
+                
+                // Find and highlight current product
+                const container = document.querySelector('[data-asin="{asin}"]')?.closest('.a-cardui, [data-a-card-type]');
+                if (container) {{
+                    container.classList.add('scraping-highlight');
+                    container.style.border = '4px solid #00FF00';
+                    container.style.backgroundColor = 'rgba(0, 255, 0, 0.1)';
+                    container.style.transition = 'all 0.3s ease';
+                    container.scrollIntoView({{ behavior: 'smooth', block: 'center' }});
+                    
+                    // Add label showing it's being scraped
+                    const label = document.createElement('div');
+                    label.style.cssText = 'position: absolute; top: 5px; left: 5px; background: #00FF00; color: black; padding: 8px 12px; font-weight: bold; z-index: 9999; border-radius: 6px; box-shadow: 0 2px 8px rgba(0,255,0,0.5); animation: pulse 1s infinite;';
+                    label.innerHTML = '<span style="font-size: 14px;">🔄 SCRAPING ASIN: {asin}</span>';
+                    label.className = 'scraping-label';
+                    
+                    // Add pulse animation
+                    if (!document.getElementById('scraping-animation-style')) {{
+                        const style = document.createElement('style');
+                        style.id = 'scraping-animation-style';
+                        style.textContent = `
+                            @keyframes pulse {{
+                                0%, 100% {{ transform: scale(1); }}
+                                50% {{ transform: scale(1.05); }}
+                            }}
+                        `;
+                        document.head.appendChild(style);
+                    }}
+                    
+                    // Remove old label if exists
+                    const oldLabel = document.querySelector('.scraping-label');
+                    if (oldLabel) oldLabel.remove();
+                    
+                    // Make container relative if not already
+                    if (getComputedStyle(container).position === 'static') {{
+                        container.style.position = 'relative';
+                    }}
+                    
+                    container.appendChild(label);
+                    
+                    // Change to "COMPLETE" after scraping
+                    setTimeout(() => {{
+                        if (label.parentNode) {{
+                            label.style.background = '#32CD32';
+                            label.innerHTML = '<span style="font-size: 14px;">✅ COMPLETE</span>';
+                        }}
+                        container.style.border = '2px solid #32CD32';
+                        container.style.backgroundColor = 'rgba(50, 205, 50, 0.05)';
+                    }}, 1500);
+                    
+                    // Remove label after showing complete
+                    setTimeout(() => {{
+                        if (label.parentNode) label.remove();
+                    }}, 3000);
+                }}
+            }})();
+        """)
+        time.sleep(0.3)  # Brief pause to show highlight
+    except Exception as e:
+        # Don't fail scraping if highlight fails
+        pass
+
+
+def scrape_product_from_listing(container):
+    """
+    Scrape product details directly from listing page container
+    Creates multiple rows for quantity-based pricing tiers
+    Uses robust selectors with fallbacks (EXACT COPY from amazon_auto.py)
+    
+    Args:
+        container: Playwright locator for product card container
+        
+    Returns:
+        List of dictionaries (one per quantity tier), or empty list if failed
+    """
+    try:
+        products_data = []
+        timestamp = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+        
+        # ===== Extract ASIN (CRITICAL) =====
+        asin = ''
+        try:
+            # Try multiple ways to get ASIN
+            asin_selectors = [
+                '[data-asin]',
+                '[data-asin]:not([data-asin=""])',
+                'div[data-asin]',
+                'section[data-asin]'
+            ]
+            for selector in asin_selectors:
+                asin_elem = container.locator(selector).first
+                if asin_elem.count() > 0:
+                    asin = asin_elem.get_attribute('data-asin')
+                    if asin and len(asin) == 10:  # ASIN is always 10 characters
+                        break
+        except Exception as e:
+            print(f"    [DEBUG] ASIN extraction error: {e}")
+        
+        if not asin:
+            return []  # Can't proceed without ASIN
+        
+        # ===== Extract Product Name (IMPORTANT) =====
+        name = ''
+        try:
+            # Try multiple selectors for product name
+            name_selectors = [
+                'span.a-truncate-full.a-offscreen',
+                '.a-truncate-full',
+                'a[title]',  # Fallback: link title attribute
+                'h2 a span'
+            ]
+            for selector in name_selectors:
+                name_elem = container.locator(selector).first
+                if name_elem.count() > 0:
+                    name = name_elem.inner_text().strip()
+                    if name:
+                        break
+            
+            # Fallback: try getting from title attribute
+            if not name:
+                title_elem = container.locator('a[title]').first
+                if title_elem.count() > 0:
+                    name = title_elem.get_attribute('title')
+        except Exception as e:
+            print(f"    [DEBUG] Name extraction error: {e}")
+        
+        # ===== Extract Reference Price (Individual/Retail Price - 個人向け価格) =====
+        reference_price = ''
+        try:
+            # Comprehensive selectors for reference price (strikethrough price)
+            ref_selectors = [
+                '._dmFsd_retailPriceMobileInt_22uHn .a-offscreen',  # Mobile view
+                '._dmFsd_retailPriceInt_HVi7A .a-offscreen',  # Desktop view
+                'span.a-price.a-text-price[data-a-strike="true"] .a-offscreen',
+                '.a-text-price .a-offscreen',
+                'span[data-a-strike="true"] .a-offscreen'
+            ]
+            for selector in ref_selectors:
+                ref_elem = container.locator(selector).first
+                if ref_elem.count() > 0:
+                    ref_text = ref_elem.inner_text().strip()
+                    reference_price = extract_number(ref_text)
+                    if reference_price:
+                        break
+        except Exception as e:
+            print(f"    [DEBUG] Reference price extraction error: {e}")
+        
+        # ===== Extract Base Discount Rate (from badge or savings text) =====
+        discount_rate_base = ''
+        try:
+            discount_selectors = [
+                'span._dmFsd_savingsBadge_25xkz',  # Badge at top
+                'span._dmFsd_businessSavingsMobileInt_2V1aF',  # Mobile savings
+                'div._dmFsd_businessSavingsInt_2W0Iq',  # Desktop savings
+                'span:has-text("OFF")',  # Any span with "OFF" text
+                'span:has-text("%")'  # Any span with percentage
+            ]
+            for selector in discount_selectors:
+                discount_elem = container.locator(selector).first
+                if discount_elem.count() > 0:
+                    discount_text = discount_elem.inner_text().strip()
+                    discount_rate_base = extract_number(discount_text)
+                    if discount_rate_base:
+                        break
+        except Exception as e:
+            print(f"    [DEBUG] Discount rate extraction error: {e}")
+        
+        # ===== Extract Quantity Tiers (KEY FEATURE) =====
+        quantity_tiers = []
+        try:
+            # First, try to ensure the quantity dropdown is accessible
+            # Some dropdowns might need to be expanded first
+            quantity_picker = container.locator('div._dmFsd_quantityPicker_s7cKy').first
+            if quantity_picker.count() == 0:
+                print(f"    [DEBUG] No quantity picker found for ASIN {asin}")
+            
+            # IMPORTANT: Check for "Load More" button (さらに読み込む) and click it to reveal all tiers
+            # The button appears when there are more quantity tiers to load
+            load_more_button = container.locator('div._dmFsd_qpLoadMoreBtn_1uSIC, button:has-text("さらに読み込む")').first
+            if load_more_button.count() > 0:
+                try:
+                    # Check if button is visible and clickable (not display:none)
+                    if load_more_button.is_visible(timeout=500):
+                        print(f"    [INFO] Found 'Load More' button - clicking to reveal all quantity tiers for ASIN {asin}")
+                        load_more_button.scroll_into_view_if_needed(timeout=2000)
+                        load_more_button.click(timeout=2000)
+                        time.sleep(0.8)  # Wait for additional tiers to load
+                        print(f"    [SUCCESS] Loaded additional quantity tiers")
+                except Exception as e:
+                    print(f"    [DEBUG] Load More button not clickable or not visible: {e}")
+            
+            # Find quantity picker items (hidden dropdown with data attributes)
+            tier_items = container.locator('ul._dmFsd_qpDropdown_2UuXs li._dmFsd_qpItem_3tHmj').all()
+            
+            for tier_item in tier_items:
+                try:
+                    # Extract quantity (minimum quantity for this tier)
+                    # IMPORTANT: Read from nested div FIRST (the <li> element always has "1")
+                    quantity = None
+                    
+                    # Primary method: Get from visible text to preserve "+" symbol
+                    # This captures "1", "2+", "5+", "10+", "15+", "20+" exactly as displayed
+                    quantity_text = tier_item.locator('div._dmFsd_qpItemQuantity_3S1pu span').first
+                    if quantity_text.count() > 0:
+                        text = quantity_text.inner_text().strip()
+                        # Keep the text as-is to preserve "+" symbol (e.g., "2+", "5+", "10+")
+                        quantity = text
+                    
+                    # Fallback: Get from data attribute (but this loses the "+" symbol)
+                    if not quantity:
+                        quantity_div = tier_item.locator('div._dmFsd_qpItemQuantity_3S1pu').first
+                        if quantity_div.count() > 0:
+                            quantity = quantity_div.get_attribute('data-minimum-quantity')
+                    
+                    # Fallback 2: Try from <li> element (though this is usually wrong)
+                    if not quantity:
+                        quantity = tier_item.get_attribute('data-minimum-quantity')
+                    
+                    # Extract price for this tier (numeric value without formatting)
+                    tier_price = tier_item.get_attribute('data-numeric-value')
+                    
+                    if quantity and tier_price:
+                        # Clean up the price value and add ¥ symbol
+                        tier_price_clean = tier_price.replace(',', '').replace('.00', '')
+                        tier_price_with_yen = f"¥{tier_price_clean}"
+                        
+                        quantity_tiers.append({
+                            'quantity': quantity,
+                            'unit_price': tier_price_with_yen
+                        })
+                        print(f"      [DEBUG] Tier found: Qty={quantity}, Price={tier_price_with_yen}")
+                except Exception as e:
+                    print(f"      [DEBUG] Error extracting tier: {e}")
+                    continue
+        except Exception as e:
+            print(f"    [DEBUG] Quantity tiers extraction error: {e}")
+        
+        # ===== Fallback: If no quantity tiers found, get base price =====
+        if not quantity_tiers:
+            base_price = ''
+            try:
+                base_price_selectors = [
+                    'span.a-price._dmFsd_businessPriceMobileInt_3u3XJ .a-offscreen',  # Mobile business price
+                    'span.a-price._dmFsd_businessPriceInt_oPUj8 .a-offscreen',  # Desktop business price
+                    'span.a-price .a-offscreen:not([data-a-strike="true"])',  # Any non-strikethrough price
+                    'span.a-price-whole'  # Price whole number
+                ]
+                for selector in base_price_selectors:
+                    price_elem = container.locator(selector).first
+                    if price_elem.count() > 0:
+                        price_text = price_elem.inner_text().strip()
+                        base_price = extract_number(price_text)
+                        if base_price:
+                            break
+            except Exception as e:
+                print(f"    [DEBUG] Base price extraction error: {e}")
+            
+            # Create single tier with quantity 1
+            if base_price:
+                quantity_tiers.append({
+                    'quantity': '1',
+                    'unit_price': f"¥{base_price}"
+                })
+        
+        # ===== Build Product Data Rows (one per quantity tier) =====
+        if not quantity_tiers:
+            print(f"    [WARNING] No quantity tiers found for ASIN {asin}")
+        else:
+            print(f"    [INFO] Found {len(quantity_tiers)} quantity tiers for ASIN {asin}")
+        
+        for idx, tier in enumerate(quantity_tiers):
+            # Debug: Show what's in each tier
+            print(f"      Tier {idx+1}: Qty={tier.get('quantity', 'MISSING')}, Price={tier.get('unit_price', 'MISSING')}")
+            
+            # Add ¥ symbol to reference price if it exists
+            reference_price_with_yen = f"¥{reference_price}" if reference_price else ''
+            
+            # Only fill product info (timestamp, ASIN, name) for the FIRST tier
+            # Subsequent tiers have these fields blank
+            product_data = {
+                'created_time': timestamp if idx == 0 else '',
+                'asin': asin if idx == 0 else '',
+                'name': name if idx == 0 else '',
+                'quantity': tier.get('quantity', ''),  # Use .get() for safety
+                'reference_price': reference_price_with_yen,
+                'unit_price': tier.get('unit_price', ''),  # Already has ¥ symbol from extraction
+                'discount_rate': '',
+                'discount_amount': '',
+                'is_first_tier': idx == 0  # Flag to track first row for numbering
+            }
+            
+            # Calculate discount rate and amount for this tier
+            tier_unit_price = tier.get('unit_price', '')
+            if reference_price and tier_unit_price:
+                try:
+                    ref = float(reference_price)
+                    # Remove ¥ symbol from unit price for calculation
+                    curr = float(tier_unit_price.replace('¥', '').replace(',', ''))
+                    discount_amount = ref - curr
+                    discount_rate = (discount_amount / ref) * 100 if ref > 0 else 0
+                    product_data['discount_rate'] = f"{discount_rate:.1f}%"
+                    product_data['discount_amount'] = f"¥{discount_amount:.0f}"
+                except Exception as e:
+                    print(f"      [DEBUG] Discount calculation error: {e}")
+                    product_data['discount_rate'] = f"{discount_rate_base}%" if discount_rate_base else ''
+                    product_data['discount_amount'] = ''
+            else:
+                product_data['discount_rate'] = f"{discount_rate_base}%" if discount_rate_base else ''
+                product_data['discount_amount'] = ''
+            
+            products_data.append(product_data)
+        
+        return products_data
+        
+    except Exception as e:
+        print(f"    [ERROR] Failed to scrape product from listing: {e}")
+        import traceback
+        traceback.print_exc()
+        return []
+
+
+def search_and_scrape_products(page, keyword, worksheet, current_number):
+    """
+    Search for a keyword and scrape all products with real-time Google Sheets updates
+    Uses EXACT same scraping methods as amazon_auto.py
     
     Args:
         page: Playwright page object
         keyword: Search keyword
+        worksheet: gspread worksheet object for real-time updates
+        current_number: Starting product number for sequential numbering
+        
+    Returns:
+        Tuple of (unique_products_count, next_product_number)
     """
-    print("\n" + "="*60)
-    print(f"SEARCHING FOR: {keyword}")
-    print("="*60)
+    print("\n" + "="*70)
+    print(f"SEARCHING & SCRAPING FOR: {keyword}")
+    print("="*70)
     
     try:
         # Find search input
@@ -617,7 +1176,7 @@ def search_and_display_products(page, keyword):
         
         if search_input.count() == 0:
             print("[ERROR] Search input field not found")
-            return False
+            return 0, current_number
         
         # Clear existing text and enter keyword
         search_input.clear()
@@ -631,62 +1190,171 @@ def search_and_display_products(page, keyword):
         
         if search_button.count() == 0:
             print("[ERROR] Search button not found")
-            return False
+            return 0, current_number
         
         human_click(search_button, delay_after=2.0)
         wait_for_page_load(page)
         time.sleep(2)
         print("[SUCCESS] Search executed")
         
-        # Display all products with pagination
-        print("\n[3/3] 全商品を表示します（ゆっくりスクロール）...")
-        page_number = 1
+        # Scrape all products with real-time sending to Google Sheets
+        print("\n[3/3] SCRAPING & SENDING TO SHEETS (REAL-TIME)")
+        print("="*70)
         
-        while True:
-            print(f"\n{'='*60}")
-            print(f"ページ {page_number} を表示中")
-            print(f"{'='*60}")
+        scraped_asins = set()  # Track already scraped ASINs
+        total_rows_sent = 0  # Track total rows sent
+        scroll_count = 0
+        no_new_products_count = 0
+        max_consecutive_no_products = 5
+        
+        print(f"\n[INFO] Starting real-time scrape-and-send for keyword: '{keyword}'")
+        print("[INFO] Products scraped directly from listing (no page opens)")
+        print("[INFO] Multiple rows created for quantity-based pricing")
+        print("[INFO] Will continue until no more products are found")
+        print("="*70 + "\n")
+        
+        while True:  # Scrape until no more products found
+            # Find currently visible product containers
+            product_containers = page.locator("div.a-cardui._dmFsd_cardItem_1LFgv[data-a-card-type='basic']").all()
             
-            # Wait a moment before scrolling
-            time.sleep(1)
+            # Fallback selector if primary doesn't work
+            if len(product_containers) == 0:
+                product_containers = page.locator("div.a-cardui._dmFsd_cardItem_1LFgv").all()
             
-            # Scroll slowly and smoothly through current page
-            # Increased scroll_times for more visible scrolling, longer delay for clarity
-            scroll_product_page_slowly(page, scroll_times=20, scroll_delay=2.0)
+            if len(product_containers) == 0:
+                print(f"[Scroll {scroll_count + 1}] No product containers found yet, scrolling...")
+                page.mouse.wheel(0, 800)
+                time.sleep(2)
+                scroll_count += 1
+                
+                # Safeguard: don't scroll infinitely
+                if scroll_count > 50:
+                    print("\n[WARNING] Scrolled 50 times without finding products. Stopping.")
+                    break
+                continue
             
-            # Pause after scrolling completes
-            print(f"\n[INFO] ページ {page_number} のスクロール完了")
+            # Scrape new products from visible containers
+            new_products_found = 0
+            
+            for container in product_containers:
+                try:
+                    # Check if this container has an ASIN
+                    asin_elem = container.locator('[data-asin]').first
+                    if asin_elem.count() == 0:
+                        continue
+                    
+                    asin = asin_elem.get_attribute('data-asin')
+                    if not asin or asin in scraped_asins or len(asin) != 10:
+                        continue
+                    
+                    # Mark as scraped
+                    scraped_asins.add(asin)
+                    
+                    # Scrape product data (returns list of rows - one per quantity tier)
+                    product_rows = scrape_product_from_listing(container)
+                    
+                    if product_rows:
+                        # Get product name from first row
+                        first_row = product_rows[0]
+                        product_name = first_row.get('name', 'Unknown')
+                        
+                        # Highlight this product in the browser (visual feedback)
+                        highlight_product_in_browser(page, container, asin, product_name)
+                        
+                        # Send to Google Sheets IMMEDIATELY with keyword
+                        new_number = append_product_to_sheets(worksheet, product_rows, current_number, keyword)
+                        
+                        if new_number:
+                            # Success!
+                            new_products_found += 1
+                            total_rows_sent += len(product_rows)
+                            current_number = new_number
+                            
+                            # Show progress in terminal with quantity details
+                            quantities = [row.get('quantity', '?') for row in product_rows]
+                            print(f"  ✓ [{current_number - 1}] {asin} - {product_name[:50]}...")
+                            print(f"     Quantities: {', '.join(quantities)} → {len(product_rows)} rows SENT")
+                        else:
+                            print(f"  ✗ Failed to send ASIN {asin} to sheets")
+                    else:
+                        print(f"  ⚠ No data extracted for ASIN {asin}")
+                    
+                except Exception as e:
+                    print(f"  ✗ Error processing container: {e}")
+                    continue
+            
+            # Check if we found new products in this scroll
+            if new_products_found > 0:
+                no_new_products_count = 0  # Reset counter
+                print(f"\n[Scroll {scroll_count + 1}] Processed {new_products_found} new products")
+                print(f"[INFO] Total: {len(scraped_asins)} products | {total_rows_sent} rows sent to sheets\n")
+            else:
+                no_new_products_count += 1
+                print(f"[Scroll {scroll_count + 1}] No new products found")
+                
+                # Check if we've reached the end of results
+                try:
+                    # Check for pagination - if there's a "Next" button, click it
+                    next_button = page.locator('a.s-pagination-next:not(.s-pagination-disabled), li.a-last:not(.a-disabled) a').first
+                    if next_button.count() > 0 and next_button.is_visible(timeout=1000):
+                        print("\n[INFO] Found 'Next Page' button - clicking to load more products...")
+                        next_button.click()
+                        time.sleep(3)  # Wait for next page to load
+                        no_new_products_count = 0  # Reset counter after loading new page
+                        continue
+                except Exception:
+                    pass
+                
+                # If no new products found in consecutive scrolls, we've reached the end
+                if no_new_products_count >= max_consecutive_no_products:
+                    print(f"\n[INFO] No new products found after {max_consecutive_no_products} consecutive scrolls")
+                    
+                    # Final verification scroll
+                    print("[INFO] Performing final verification scroll...")
+                    page.evaluate("window.scrollTo(0, document.body.scrollHeight)")
+                    time.sleep(2)
+                    
+                    # Check one more time
+                    final_check_containers = page.locator("div.a-cardui._dmFsd_cardItem_1LFgv[data-a-card-type='basic']").all()
+                    final_new_found = 0
+                    for container in final_check_containers:
+                        try:
+                            asin_elem = container.locator('[data-asin]').first
+                            if asin_elem.count() > 0:
+                                asin = asin_elem.get_attribute('data-asin')
+                                if asin and asin not in scraped_asins and len(asin) == 10:
+                                    final_new_found += 1
+                                    break
+                        except:
+                            continue
+                    
+                    if final_new_found > 0:
+                        print(f"[INFO] Found {final_new_found} more products on final check - continuing...")
+                        no_new_products_count = 0
+                    else:
+                        print("[SUCCESS] Confirmed - no more products for this keyword")
+                        break
+            
+            # Scroll down to load more products
+            print(f"[INFO] Scrolling down to load more products...")
+            page.mouse.wheel(0, 800)
             time.sleep(2)
-            
-            # Check for next page with visible actions
-            has_next = check_and_navigate_next_page(page)
-            
-            if not has_next:
-                break
-            
-            page_number += 1
-            
-            # Brief pause between pages
-            print(f"\n[INFO] 次のページ（{page_number}）を準備中...")
-            time.sleep(1.5)
-            
-            # Safety limit to prevent infinite loops
-            if page_number > 20:
-                print(f"\n[WARNING] 最大ページ数（20ページ）に到達しました")
-                break
+            scroll_count += 1
         
-        print("\n" + "="*60)
-        print(f"[SUCCESS] Completed search for: {keyword}")
-        print(f"[INFO] Total pages displayed: {page_number}")
-        print("="*60)
+        print("\n" + "="*70)
+        print(f"[SUCCESS] Completed scraping for keyword: '{keyword}'")
+        print(f"[INFO] Unique products: {len(scraped_asins)}")
+        print(f"[INFO] Total rows sent: {total_rows_sent}")
+        print(f"[INFO] Total scrolls: {scroll_count}")
+        print("="*70)
         
-        return True
+        return len(scraped_asins), current_number
         
     except Exception as e:
-        print(f"\n[ERROR] Failed to search for '{keyword}': {e}")
+        print(f"\n[ERROR] Failed to search and scrape '{keyword}': {e}")
         import traceback
         traceback.print_exc()
-        return False
+        return len(scraped_asins) if scraped_asins else 0, current_number
 
 
 def login_to_amazon(page, context):
@@ -1066,26 +1734,48 @@ def run_category_search():
             time.sleep(3)
             print("[SUCCESS] Business Discounts page loaded")
 
-            # Search for each keyword
+            # Initialize Google Sheets
             print("\n" + "="*60)
-            print("STEP 3: SEARCHING CATEGORIES")
+            print("STEP 2: INITIALIZING GOOGLE SHEETS")
             print("="*60)
-            print(f"[INFO] Will search for {len(SEARCH_KEYWORDS)} categories:")
+            
+            gc, worksheet, current_number = initialize_google_sheets()
+            
+            if not worksheet:
+                print("\n[ERROR] Failed to initialize Google Sheets.")
+                print("[INFO] Closing browser...")
+                browser.close()
+                return False
+            
+            print(f"[SUCCESS] Google Sheets initialized")
+            print(f"[INFO] Starting product number: {current_number}")
+            print(f"[INFO] Spreadsheet: {SPREADSHEET_URL}")
+            
+            # Search and scrape each keyword
+            print("\n" + "="*60)
+            print("STEP 3: SEARCHING & SCRAPING CATEGORIES")
+            print("="*60)
+            print(f"[INFO] Will search and scrape {len(SEARCH_KEYWORDS)} keywords:")
             for i, keyword in enumerate(SEARCH_KEYWORDS, 1):
                 print(f"  {i}. {keyword}")
             print("="*60)
 
+            total_products_all_keywords = 0
+            
             for keyword_index, keyword in enumerate(SEARCH_KEYWORDS, 1):
                 print(f"\n{'='*70}")
-                print(f"CATEGORY {keyword_index}/{len(SEARCH_KEYWORDS)}: {keyword}")
+                print(f"KEYWORD {keyword_index}/{len(SEARCH_KEYWORDS)}: {keyword}")
                 print(f"{'='*70}")
                 
-                success = search_and_display_products(page, keyword)
+                # Search and scrape this keyword (returns count and next number)
+                products_count, current_number = search_and_scrape_products(page, keyword, worksheet, current_number)
                 
-                if not success:
-                    print(f"[WARNING] 検索失敗: {keyword}")
+                total_products_all_keywords += products_count
+                
+                if products_count == 0:
+                    print(f"[WARNING] No products found for keyword: {keyword}")
                 else:
-                    print(f"\n[SUCCESS] カテゴリー '{keyword}' の検索完了")
+                    print(f"\n[SUCCESS] Keyword '{keyword}' completed - {products_count} products scraped")
                 
                 # Longer pause before next search for clarity
                 if keyword_index < len(SEARCH_KEYWORDS):
@@ -1094,13 +1784,16 @@ def run_category_search():
 
             # All searches completed
             print("\n" + "="*70)
-            print(" "*15 + "✓ 全ての検索が完了しました ✓")
+            print(" "*15 + "✓ ALL KEYWORDS COMPLETED ✓")
             print("="*70)
-            print(f"[SUCCESS] {len(SEARCH_KEYWORDS)} カテゴリーの検索完了")
+            print(f"[SUCCESS] Searched {len(SEARCH_KEYWORDS)} keywords")
+            print(f"[SUCCESS] Total products scraped: {total_products_all_keywords}")
+            print(f"[SUCCESS] Data exported to Google Sheets in real-time")
+            print(f"[INFO] View at: {SPREADSHEET_URL}")
             print("="*70)
 
-            print("\n[INFO] ブラウザを15秒間開いたままにします（結果確認用）...")
-            time.sleep(15)  # Increased from 10 to 15 seconds
+            print("\n[INFO] Browser will stay open for 10 seconds for verification...")
+            time.sleep(10)
             
             print("\n[INFO] Closing browser...")
             browser.close()
@@ -1135,8 +1828,13 @@ def main():
     print("\nExecution Flow:")
     print("  1. Login to Amazon (or use saved session)")
     print("  2. Navigate to Business Discounts page")
-    print("  3. Search for each category keyword")
-    print("  4. Display all products (with pagination)")
+    print("  3. Initialize Google Sheets connection")
+    print("  4. FOR EACH KEYWORD:")
+    print("     a. Search for keyword")
+    print("     b. Scrape ALL products (with pagination)")
+    print("     c. Extract quantity tiers (1, 2+, 5+, 10+, etc.)")
+    print("     d. Send to Google Sheets IMMEDIATELY (real-time)")
+    print("  5. Continue until all keywords are processed")
     print("="*70 + "\n")
     
     # Check if Gmail credentials exist
